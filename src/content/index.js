@@ -1,5 +1,4 @@
 import { NEXUS_DEFAULT_SHORTCUTS } from '../utils/constants.js';
-import { EventCleanupManager } from './event_cleanup.js';
 import { ShadowHostManager } from './shadow_host.js';
 import { extractMainContent, nexusEstimateTokens, getActiveSelection, getSmartSelectionText, getSentenceContext, getParagraphContext } from './page_reader.js';
 import { playCombinedAudio, stopAudio } from './audio_player.js';
@@ -8,7 +7,6 @@ import { NexusSelection } from './selection_utils.js';
 
 (() => {
     window.katexLoaded = true;
-    const eventCleanup = new EventCleanupManager();
     const shadowManager = new ShadowHostManager();
     const { host: nexusHost, shadowRoot: nexusShadowRoot } = shadowManager.init();
 

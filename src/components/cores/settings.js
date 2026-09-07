@@ -2724,8 +2724,13 @@ export class NexusSettingsModal {
           if (Array.isArray(res.nexus_highlights)) {
             highlightCount = res.nexus_highlights.length;
           }
-          const customAppsRes = await chrome.storage.local.get(['nexus_custom_apps']).catch(() => ({}));
-          appsCount = Object.keys(customAppsRes?.nexus_custom_apps || {}).length;
+          if (typeof NexusAppsDB !== 'undefined') {
+            const apps = await NexusAppsDB.getAllApps().catch(() => []);
+            appsCount = (apps || []).length;
+          } else {
+            const customAppsRes = await chrome.storage.local.get(['nexus_custom_apps']).catch(() => ({}));
+            appsCount = Object.keys(customAppsRes?.nexus_custom_apps || {}).length;
+          }
         }
         if (itemsEl) {
           itemsEl.textContent = `${sessionCount} ${sessionCount === 1 ? 'chat' : 'chats'}`;

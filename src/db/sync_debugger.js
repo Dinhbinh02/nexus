@@ -1,4 +1,5 @@
 import { NexusSync, isExcludedKey } from './drive_sync.js';
+import { NexusAppsDB } from './apps_db.js';
 
 async function gatherLocalStats() {
     const stats = {
@@ -19,9 +20,7 @@ async function gatherLocalStats() {
     }
 
     try {
-        const customAppsRes = await chrome.storage.local.get(['nexus_custom_apps']);
-        const customApps = customAppsRes.nexus_custom_apps || {};
-        const appList = Object.values(customApps);
+        const appList = await NexusAppsDB.getAllApps().catch(() => []);
         stats.apps.count = appList.length;
         stats.apps.list = appList.map(a => ({ id: a.id, name: a.name, updatedAt: a.updatedAt ? new Date(a.updatedAt).toLocaleString() : '?' }));
     } catch (e) {

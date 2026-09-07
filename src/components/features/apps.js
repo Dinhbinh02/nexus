@@ -4,14 +4,14 @@ import { NexusMenu, NexusChatInput, NexusModal } from '../ui/index.js';
 import { NexusModelHelper } from '../cores/model_helper.js';
 import { NexusChatUI } from '../cores/chat_ui.js';
 import { NexusCodeEditor } from '../ui/nexus_code_editor.js';
-import { NexusAppsCheckpointDB } from '../../db/apps_checkpoint_db.js';
+import { NexusAppsDB, NexusAppsCheckpointDB } from '../../db/apps_db.js';
 
 export const APPS_STORAGE_KEY = 'nexus_custom_apps';
 
 function getAppColor(name) {
     const colors = [
-        '#64748b', '#ef4444', '#f97316', '#f59e0b', '#10b981', 
-        '#06b6d4', '#0ea5e9', '#3b82f6', '#6366f1', '#8b5cf6', 
+        '#64748b', '#ef4444', '#f97316', '#f59e0b', '#10b981',
+        '#06b6d4', '#0ea5e9', '#3b82f6', '#6366f1', '#8b5cf6',
         '#d946ef', '#f43f5e', '#14b8a6', '#84cc16'
     ];
     let hash = 0;
@@ -248,6 +248,10 @@ You follow rigorous engineering and modern UI design principles:
 - **Responsive & Box-Sizing**: Always use \`box-sizing: border-box; margin: 0; padding: 0;\`. Ensure elements shrink and adapt gracefully down to mobile screens (320px) using flexbox, grid, and relative units.
 - **Typography & Numerical Stability**: Use clean sans-serif (\`'Inter', -apple-system, BlinkMacSystemFont, sans-serif\`) and monospace for code/data. Letter spacing must be 0 or slightly positive, never negative. All numbers, timers, rates, and values MUST use \`font-variant-numeric: tabular-nums;\` to prevent layout jittering during state changes.
 
+### Concise App Title & Metadata
+- **Short Title**: Always provide a concise, clean title (2-4 words maximum in \`<title>\`).
+- **No Bloated Subtitles**: Do not add long descriptions, parentheses, or verbose subtitles in \`<title>\`. Keep it short and elegant.
+
 # 2. CODE QUALITY & ENGINEERING JUDGMENT
 - **Self-Contained & Vanilla**: Output complete, runnable HTML5, modern CSS3, and Vanilla JS (ES6+).
 - **Zero Narrative Comments**: Do NOT write comments that narrate the obvious. Write clean, self-documenting code with meaningful function and variable names.
@@ -282,12 +286,13 @@ The sandbox environment automatically provides \`window.NexusApp\` with enterpri
 ### PROTOCOL A: NEW APPS / COMPLETE REWRITE (<GenerateApp>)
 When building a new app or when a complete rewrite is requested, output the entire runnable document wrapped in <GenerateApp>:
 
-<GenerateApp title="App Name">
+<GenerateApp>
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Short App Title</title>
   <style>
     /* Clean, solid, anti-slop CSS adhering to modern UI principles */
   </style>
@@ -313,7 +318,18 @@ When editing, enhancing, or debugging an existing app, NEVER rewrite the entire 
 </PatchApp>
 
 - Match exact whitespace and context lines (1-3 lines of context if needed for uniqueness).
-- Keep patches minimal, fast, and targeted.`;
+- Keep patches minimal, fast, and targeted.
+
+# 5. USER COMMUNICATION & SUMMARY PROTOCOL (MANDATORY)
+- OUTPUT ORDER: ALWAYS emit the code block (<GenerateApp> or <PatchApp>) FIRST at the very top of your response.
+- NEVER put conversational text, greetings, or explanations before the opening code tag.
+- Place your concise, professional summary and user explanation STRICTLY AFTER the closing tag (</GenerateApp> or </PatchApp>).
+- Always communicate directly with the user in the language they used.
+- Your summary after the code must explain:
+  1. What features, UI components, or logic were created or upgraded.
+  2. How specific requirements, layouts, or interactions were implemented.
+  3. Key instructions or keyboard shortcuts for testing the app.
+- Use structured markdown (bullet points, bold highlights) for high readability. Never omit the post-code explanation.`;
 
 export class AppsPanel {
     constructor() {
@@ -386,6 +402,12 @@ export class AppsPanel {
         this.studioExportBtn = document.getElementById('apps-studio-export-btn');
         this.studioDeleteBtn = document.getElementById('apps-studio-delete-btn');
         this.studioPreviewFrame = document.getElementById('apps-studio-preview-iframe');
+        if (this.studioPreviewFrame && !this.studioPreviewFrame.src) {
+            const sandboxUrl = (typeof chrome !== 'undefined' && chrome.runtime?.getURL)
+                ? chrome.runtime.getURL('pages/sandbox/widget_sandbox.html')
+                : '/pages/sandbox/widget_sandbox.html';
+            this.studioPreviewFrame.src = sandboxUrl;
+        }
         this.studioCodeEditorContainer = document.getElementById('apps-code-editor-container');
         this.studioCodeCopyBtn = document.getElementById('apps-code-copy-btn');
         this.studioTabPreview = document.getElementById('apps-tab-preview');
@@ -608,17 +630,23 @@ export class AppsPanel {
 
     async loadCustomApps() {
         try {
-            const res = await chrome.storage.local.get([APPS_STORAGE_KEY]);
-            this.customApps = res[APPS_STORAGE_KEY] || {};
+            this.customApps = await NexusAppsDB.getAllAppsMap();
             this.syncTitleCache();
         } catch (e) {
+            console.error('[AppsPanel] Failed to load apps from DB:', e);
             this.customApps = {};
         }
     }
 
     async saveCustomApps() {
         try {
-            await chrome.storage.local.set({ [APPS_STORAGE_KEY]: this.customApps });
+            if (this.customApps) {
+                for (const app of Object.values(this.customApps)) {
+                    if (app && app.id) {
+                        await NexusAppsDB.putApp(app);
+                    }
+                }
+            }
             this.syncTitleCache();
             if (typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
                 NexusSync.triggerDebouncedSync();
@@ -644,7 +672,7 @@ export class AppsPanel {
                 }
             });
             localStorage.setItem('nexus_apps_titles_cache', JSON.stringify(cache));
-        } catch (e) {}
+        } catch (e) { }
     }
 
     showHubView() {
@@ -862,14 +890,12 @@ export class AppsPanel {
             this.studioTitleInput.readOnly = !!app.isBuiltin;
         }
 
-        await this.loadCheckpoints(app.id);
-        this.updateCodeView(app.code || '');
-        this.renderCodeDiffView();
-        this.updateFloatingDiffBar();
-
-        this.renderChatMessages();
+        // Fast render path: trigger preview immediately without waiting for checkpoints
         this.switchStudioTab('preview');
-        this.refreshStudioPreview();
+
+        // Non-blocking background sync for checkpoints & chat history
+        this.loadCheckpoints(app.id).catch(() => {});
+        this.renderChatMessages();
 
         if (typeof window.NexusViewManager !== 'undefined') {
             window.NexusViewManager.updateUrl('apps', { appId: app.id, mode: 'player' });
@@ -886,14 +912,15 @@ export class AppsPanel {
             this.studioTitleInput.readOnly = false;
         }
 
-        await this.loadCheckpoints(app.id);
-        this.updateCodeView(app.code || '');
-        this.renderCodeDiffView();
-        this.updateFloatingDiffBar();
-
-        this.renderChatMessages();
         this.switchStudioTab('preview');
-        this.refreshStudioPreview();
+        this.renderChatMessages();
+
+        // Non-blocking checkpoint and code view update
+        this.loadCheckpoints(app.id).then(() => {
+            this.updateCodeView(app.code || '');
+            this.renderCodeDiffView();
+            this.updateFloatingDiffBar();
+        }).catch(() => {});
 
         requestAnimationFrame(() => {
             if (this.studioPromptInput && !this.isPlayerMode) {
@@ -979,6 +1006,10 @@ export class AppsPanel {
     refreshStudioPreview() {
         if (!this.currentApp) return;
 
+        try {
+            WidgetRunner.stopActiveTTS?.();
+        } catch (_) {}
+
         if (this.currentApp.isBuiltin && widgetRegistry.has(this.currentApp.id) && this.nativeWidgetHost) {
             if (this.studioPreviewFrame) this.studioPreviewFrame.style.display = 'none';
             this.nativeWidgetHost.style.display = 'flex';
@@ -1002,17 +1033,8 @@ export class AppsPanel {
             this.studioPreviewFrame.setAttribute('data-widget-raw', encodeURIComponent(cleanCode));
         }
 
-        const sendToSandbox = async () => {
+        const sendToSandbox = (storedData = {}) => {
             try {
-                let storedData = {};
-                if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-                    try {
-                        const storageKey = `nexus_sandbox_${appId}`;
-                        const res = await chrome.storage.local.get([storageKey]);
-                        if (res[storageKey]) storedData = res[storageKey];
-                    } catch (_) {}
-                }
-
                 this.studioPreviewFrame.contentWindow?.postMessage({
                     type: 'NEXUS_WIDGET_RENDER',
                     code: cleanCode,
@@ -1030,12 +1052,21 @@ export class AppsPanel {
             ? chrome.runtime.getURL('pages/sandbox/widget_sandbox.html')
             : '/pages/sandbox/widget_sandbox.html';
 
-        if (!this.studioPreviewFrame.src || !this.studioPreviewFrame.src.includes('widget_sandbox.html')) {
-            this.studioPreviewFrame.onload = () => sendToSandbox();
-            this.studioPreviewFrame.src = sandboxUrl;
-        } else {
-            sendToSandbox();
-        }
+        NexusAppsDB.getSandboxData(appId).then(storedData => {
+            if (!this.studioPreviewFrame.src || !this.studioPreviewFrame.src.includes('widget_sandbox.html')) {
+                this.studioPreviewFrame.onload = () => sendToSandbox(storedData);
+                this.studioPreviewFrame.src = sandboxUrl;
+            } else {
+                sendToSandbox(storedData);
+            }
+        }).catch(() => {
+            if (!this.studioPreviewFrame.src || !this.studioPreviewFrame.src.includes('widget_sandbox.html')) {
+                this.studioPreviewFrame.onload = () => sendToSandbox({});
+                this.studioPreviewFrame.src = sandboxUrl;
+            } else {
+                sendToSandbox({});
+            }
+        });
     }
 
     escapeHtml(str) {
@@ -1047,15 +1078,12 @@ export class AppsPanel {
         if (!text) return '';
         let raw = String(text);
 
-        // Completely strip <think>...</think> and <thought>...</thought>
+        // Strip <think> and <thought> tags completely
         raw = raw.replace(/<(?:think|thought)>[\s\S]*?(?:<\/(?:think|thought)>|$)/gi, '').trim();
 
-        // Clean out widget or block tags if any remain
-        if (raw.includes('<GenerateApp')) raw = raw.split('<GenerateApp')[0];
-        if (raw.includes('<GenerateWidget')) raw = raw.split('<GenerateWidget')[0];
-        if (raw.includes('<PatchApp')) raw = raw.split('<PatchApp')[0];
-        if (raw.includes('<PatchWidget')) raw = raw.split('<PatchWidget')[0];
-        if (raw.includes('```')) raw = raw.split('```')[0];
+        // Strip code generation blocks completely so only the markdown explanation remains
+        raw = raw.replace(/<(?:GenerateApp|GenerateWidget|PatchApp|PatchWidget)[^>]*>[\s\S]*?(?:<\/(?:GenerateApp|GenerateWidget|PatchApp|PatchWidget)>|$)/gi, '');
+        raw = raw.replace(/<<<<<<< SEARCH[\s\S]*?>>>>>>> REPLACE/gi, '');
         raw = raw.trim();
 
         if (!raw) return '';
@@ -1077,7 +1105,7 @@ export class AppsPanel {
 
     stopGeneration() {
         if (this.currentStreamPort) {
-            try { this.currentStreamPort.disconnect(); } catch (e) {}
+            try { this.currentStreamPort.disconnect(); } catch (e) { }
             this.currentStreamPort = null;
         }
         this.isGenerating = false;
@@ -1374,25 +1402,25 @@ export class AppsPanel {
 
     renderChatMessages() {
         if (!this.studioChatMessages || !this.currentApp) return;
-        const msgs = (this.currentApp.chatHistory || []).filter(m => 
+        const msgs = (this.currentApp.chatHistory || []).filter(m =>
             !(m.role === 'assistant' && (
-                m.text.includes('👋 Hello! How can I help') || 
+                m.text.includes('👋 Hello! How can I help') ||
                 m.text.includes('Loaded template for')
             ))
         );
 
         if (msgs.length === 0) {
-            const isNewBlankApp = !this.currentApp.code || 
-                this.currentApp.name === 'New Custom App' || 
+            const isNewBlankApp = !this.currentApp.code ||
+                this.currentApp.name === 'New Custom App' ||
                 this.currentApp.name === 'Untitled App' ||
                 this.currentApp.code.includes('My New App');
 
             const appName = this.currentApp.name || (isNewBlankApp ? 'New Custom App' : 'Untitled App');
-            const appDesc = isNewBlankApp 
+            const appDesc = isNewBlankApp
                 ? 'Describe the web app, interactive tool, or mini game you want to build from scratch.'
                 : (this.currentApp.description || 'Describe how you want to modify, customize, or redesign this app.');
             const color = getAppColor(appName);
-            
+
             let avatarHTML = '';
             let bgStyle = '';
             if (this.currentApp.icon && this.currentApp.icon.includes('<svg')) {
@@ -1446,7 +1474,7 @@ export class AppsPanel {
             this.updateFloatingDiffBar();
             return;
         }
-        
+
         let html = '';
         for (let i = 0; i < msgs.length; i++) {
             const m = msgs[i];
@@ -1456,7 +1484,7 @@ export class AppsPanel {
                 const assistantRaw = nextMsg ? nextMsg.text.replace(/<(?:think|thought)>[\s\S]*?(?:<\/(?:think|thought)>|$)/gi, '').trim() : 'App code updated according to requirements.';
                 const assistantContent = nextMsg ? this.formatMarkdown(nextMsg.text) : '<span>App updated and verified.</span>';
                 const filesHTML = this.renderQuestionFilesHTML(m.files);
-                
+
                 html += `
                     <div class="nexus-entry" data-entry-type="qa" data-entry-index="${i}">
                         <div class="nexus-question-row">
@@ -1626,7 +1654,7 @@ export class AppsPanel {
             range.collapse(false);
             sel.removeAllRanges();
             sel.addRange(range);
-        } catch (e) {}
+        } catch (e) { }
     }
 
     showConfirmUndoModal({ files = [] } = {}) {
@@ -1743,22 +1771,31 @@ export class AppsPanel {
             });
         });
 
-        this.studioChatMessages.querySelectorAll('.btn-regenerate').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const entryIndex = parseInt(btn.dataset.entryIndex, 10);
-                const prompt = btn.dataset.prompt || '';
-                if (!isNaN(entryIndex) && this.currentApp && Array.isArray(this.currentApp.chatHistory)) {
-                    this.currentApp.chatHistory = this.currentApp.chatHistory.slice(0, entryIndex);
-                    this.saveCurrentApp();
+        if (!this._studioChatDelegationBound) {
+            this._studioChatDelegationBound = true;
+            this.studioChatMessages.addEventListener('click', (e) => {
+                const editBtn = e.target.closest('.btn-edit');
+                if (editBtn) {
+                    e.stopPropagation();
+                    const entryIndex = parseInt(editBtn.dataset.entryIndex, 10);
+                    const entry = editBtn.closest('.nexus-entry');
+                    const questionDiv = entry?.querySelector('.nexus-chat-question');
+                    if (questionDiv) {
+                        this.enterQuestionEditMode(questionDiv, entryIndex);
+                    }
+                    return;
                 }
-                if (prompt && this.studioPromptInput) {
-                    this.studioPromptInput.value = prompt;
-                    this.studioPromptInput.style.removeProperty('height');
-                    this.handlePromptSubmit();
+                const header = e.target.closest('.nexus-thinking-header');
+                if (header) {
+                    e.stopPropagation();
+                    const container = header.closest('.nexus-thinking-container');
+                    if (container) {
+                        container.classList.toggle('collapsed');
+                        container.dataset.userToggled = 'true';
+                    }
                 }
             });
-        });
+        }
     }
 
     addChatMessage(role, text) {
@@ -1777,13 +1814,13 @@ export class AppsPanel {
 
     async handlePromptSubmit(promptText = null, files = null, options = null) {
         if (this.isGenerating || !this.currentApp) return;
-        const prompt = (promptText !== null && promptText !== undefined) 
-            ? String(promptText).trim() 
+        const prompt = (promptText !== null && promptText !== undefined)
+            ? String(promptText).trim()
             : (this.studioPromptInput ? this.studioPromptInput.value.trim() : '');
         if (!prompt) return;
 
-        const attachedFiles = Array.isArray(files) 
-            ? files 
+        const attachedFiles = Array.isArray(files)
+            ? files
             : (this.chatUI?.attachedFiles ? [...this.chatUI.attachedFiles] : []);
 
         if (this.studioPromptInput) {
@@ -1867,40 +1904,74 @@ export class AppsPanel {
                 let thinkInterval = null;
                 let currentThoughtText = '';
 
-                const updateThinkingTime = (thoughtText = '') => {
+                let thinkingContainerEl = null;
+                let thinkingTitleEl = null;
+                let thinkingContentEl = null;
+                let thinkingLoaderEl = null;
+                let lastRenderedThought = '';
+
+                const updateThinkingTime = (thoughtText = '', isComplete = false) => {
                     if (!thinkingMount) return;
                     currentThoughtText = thoughtText;
                     const elapsedSec = Math.max(1, Math.round((Date.now() - startTime) / 1000));
                     const timeLabel = elapsedSec < 60 ? `${elapsedSec}s` : `${Math.floor(elapsedSec / 60)}m ${elapsedSec % 60}s`;
-                    const renderedThought = thoughtText ? this.formatMarkdown(thoughtText) : '';
+                    const currentTitle = isComplete ? `Thought for ${timeLabel}` : `Thinking... (${timeLabel})`;
 
-                    if (renderedThought) {
-                        thinkingMount.innerHTML = `
-                            <div class="nexus-thinking-container">
-                                <div class="nexus-thinking-header">
-                                    <span class="nexus-thinking-icon">
-                                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
-                                    </span>
-                                    <span class="nexus-thinking-title">${this.escapeHtml(stepLabel)} (${timeLabel})</span>
-                                    <span class="nexus-thinking-chevron">
-                                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                                    </span>
+                    if (thoughtText) {
+                        if (!thinkingContainerEl || !thinkingMount.contains(thinkingContainerEl)) {
+                            thinkingMount.innerHTML = `
+                                <div class="nexus-thinking-container">
+                                    <div class="nexus-thinking-header">
+                                        <span class="nexus-thinking-icon">
+                                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
+                                        </span>
+                                        <span class="nexus-thinking-title">${this.escapeHtml(currentTitle)}</span>
+                                        <span class="nexus-thinking-chevron">
+                                            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                                        </span>
+                                    </div>
+                                    <div class="nexus-thinking-content markdown-body"></div>
                                 </div>
-                                <div class="nexus-thinking-content markdown-body">${renderedThought}</div>
-                            </div>
-                        `;
+                            `;
+                            thinkingContainerEl = thinkingMount.querySelector('.nexus-thinking-container');
+                            thinkingTitleEl = thinkingMount.querySelector('.nexus-thinking-title');
+                            thinkingContentEl = thinkingMount.querySelector('.nexus-thinking-content');
+                            thinkingLoaderEl = null;
+                        } else if (thinkingTitleEl) {
+                            thinkingTitleEl.textContent = currentTitle;
+                        }
+
+                        if (thinkingContentEl && thoughtText !== lastRenderedThought) {
+                            lastRenderedThought = thoughtText;
+                            const isNearBottom = (thinkingContentEl.scrollHeight - thinkingContentEl.scrollTop - thinkingContentEl.clientHeight) < 40;
+                            thinkingContentEl.innerHTML = this.formatMarkdown(thoughtText, true);
+                            if (isNearBottom && !thinkingContainerEl.classList.contains('collapsed')) {
+                                thinkingContentEl.scrollTop = thinkingContentEl.scrollHeight;
+                            }
+                        }
                     } else {
-                        thinkingMount.innerHTML = `
-                            <div class="nexus-thinking">
-                                <div class="nexus-dots-loader"><span></span><span></span><span></span></div>
-                                <span class="nexus-status-text">${this.escapeHtml(stepLabel)} (${timeLabel})</span>
-                            </div>
-                        `;
+                        if (!thinkingLoaderEl || !thinkingMount.contains(thinkingLoaderEl)) {
+                            thinkingMount.innerHTML = `
+                                <div class="nexus-thinking">
+                                    <div class="nexus-dots-loader"><span></span><span></span><span></span></div>
+                                    <span class="nexus-status-text">Thinking... (${timeLabel})</span>
+                                </div>
+                            `;
+                            thinkingLoaderEl = thinkingMount.querySelector('.nexus-thinking');
+                            thinkingContainerEl = null;
+                        } else {
+                            const statusText = thinkingLoaderEl.querySelector('.nexus-status-text');
+                            if (statusText) statusText.textContent = `Thinking... (${timeLabel})`;
+                        }
                     }
                 };
 
                 thinkInterval = setInterval(() => {
-                    updateThinkingTime(currentThoughtText);
+                    const lastThinkStart = streamedText.lastIndexOf('<think>');
+                    const lastThinkEnd = streamedText.lastIndexOf('</think>');
+                    const hasThink = lastThinkStart !== -1;
+                    const isThinkingComplete = hasThink && (lastThinkEnd > lastThinkStart);
+                    updateThinkingTime(currentThoughtText, isThinkingComplete);
                 }, 1000);
 
                 try {
@@ -1923,50 +1994,46 @@ export class AppsPanel {
 
                             if (hasThink && !isThinkingComplete) {
                                 const thoughtSoFar = streamedText.substring(lastThinkStart + 7).trim();
-                                updateThinkingTime(thoughtSoFar);
-                            } else {
-                                if (thinkInterval) {
-                                    clearInterval(thinkInterval);
-                                    thinkInterval = null;
-                                }
-                                if (hasThink && isThinkingComplete) {
-                                    const fullThought = streamedText.substring(lastThinkStart + 7, lastThinkEnd).trim();
-                                    if (fullThought) {
-                                        const elapsedSec = Math.max(1, Math.round((Date.now() - startTime) / 1000));
-                                        const timeLabel = elapsedSec < 60 ? `${elapsedSec}s` : `${Math.floor(elapsedSec / 60)}m ${elapsedSec % 60}s`;
-                                        thinkingMount.innerHTML = `
-                                            <div class="nexus-thinking-container collapsed">
-                                                <div class="nexus-thinking-header">
-                                                    <span class="nexus-thinking-icon">
-                                                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
-                                                    </span>
-                                                    <span class="nexus-thinking-title">${this.escapeHtml(stepLabel)} (${timeLabel})</span>
-                                                    <span class="nexus-thinking-chevron">
-                                                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                                                    </span>
-                                                </div>
-                                                <div class="nexus-thinking-content markdown-body">${this.formatMarkdown(fullThought)}</div>
-                                            </div>
-                                        `;
-                                    } else {
-                                        thinkingMount.innerHTML = '';
-                                    }
-                                } else {
-                                    if (thinkingMount) {
-                                        thinkingMount.innerHTML = '';
-                                    }
-                                }
-                                let preview = streamedText.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').trim();
-                                if (answerBodyDiv) {
-                                    answerBodyDiv.innerHTML = preview ? this.formatMarkdown(preview) : '';
+                                updateThinkingTime(thoughtSoFar, false);
+                            } else if (hasThink && isThinkingComplete) {
+                                const fullThought = streamedText.substring(lastThinkStart + 7, lastThinkEnd).trim();
+                                if (fullThought) {
+                                    updateThinkingTime(fullThought, true);
                                 }
                             }
+
+                            // Handle live coding status & preview
+                            const isCodeStreaming = streamedText.includes('<GenerateApp') || streamedText.includes('<GenerateWidget') || streamedText.includes('<PatchApp') || streamedText.includes('<PatchWidget') || streamedText.includes('<<<<<<< SEARCH');
+                            const isCodeClosed = streamedText.includes('</GenerateApp>') || streamedText.includes('</GenerateWidget>') || streamedText.includes('</PatchApp>') || streamedText.includes('</PatchWidget>');
+
+                            let preview = streamedText
+                                .replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '')
+                                .replace(/<(?:GenerateApp|GenerateWidget|PatchApp|PatchWidget)[^>]*>[\s\S]*?(?:<\/(?:GenerateApp|GenerateWidget|PatchApp|PatchWidget)>|$)/gi, '')
+                                .replace(/<<<<<<< SEARCH[\s\S]*?>>>>>>> REPLACE/gi, '')
+                                .trim();
+
+                            if (answerBodyDiv) {
+                                if (isCodeStreaming && !isCodeClosed && !preview) {
+                                    const codingText = isNewApp ? 'Generating application code...' : 'Applying code patch & updates...';
+                                    answerBodyDiv.innerHTML = `
+                                        <div class="nexus-code-generating-status">
+                                            <span class="nexus-code-generating-spinner"></span>
+                                            <span class="nexus-code-generating-text">${codingText}</span>
+                                        </div>
+                                    `;
+                                } else if (preview) {
+                                    answerBodyDiv.innerHTML = this.formatMarkdown(preview);
+                                } else if (!hasThink) {
+                                    answerBodyDiv.innerHTML = '';
+                                }
+                            }
+
                             if (this.chatUI) {
                                 if (!this.chatUI.disableAutoScroll && this.chatUI._isNearBottom(28)) {
                                     this.studioChatMessages.scrollTop = this.studioChatMessages.scrollHeight;
                                 }
                             } else {
-                                const isNearBottom = (this.studioChatMessages.scrollHeight - this.studioChatMessages.scrollTop - this.studioChatMessages.clientHeight) < 30;
+                                const isNearBottom = (this.studioChatMessages.scrollHeight - this.studioChatMessages.scrollTop - this.studioChatMessages.clientHeight) < 40;
                                 if (isNearBottom) {
                                     this.studioChatMessages.scrollTop = this.studioChatMessages.scrollHeight;
                                 }
@@ -2008,27 +2075,38 @@ export class AppsPanel {
             const userPrompt = `Current App Code:\n\`\`\`html\n${currentCode}\n\`\`\`\n\nRecent Conversation History:\n${recentHistory}\n\nUser Message:\n${prompt}`;
 
             const fullStreamedText = await executeStreamTurn(APP_BUILDER_SYSTEM_PROMPT, userPrompt, 'Thinking & Generating App...');
-            
+
             this.lastSandboxError = null;
 
             const cleanCode = WidgetRunner.extractWidgetCode(fullStreamedText, currentCode);
             if (cleanCode && cleanCode.length > 20 && cleanCode !== currentCode) {
                 this.currentApp.code = cleanCode;
                 this.updateCodeView(cleanCode);
+
+                // Auto-sync app title from <title> or <GenerateApp title="..."> to studio title input
+                const titleMatch = cleanCode.match(/<title[^>]*>([^<]+)<\/title>/i) || fullStreamedText.match(/<GenerateApp[^>]*title=["']([^"']+)["']/i);
+                if (titleMatch && titleMatch[1]) {
+                    const extractedTitle = titleMatch[1].trim().replace(/^["']|["']$/g, '').trim();
+                    if (extractedTitle && extractedTitle.length > 0) {
+                        this.currentApp.name = extractedTitle;
+                        if (this.studioTitleInput) {
+                            this.studioTitleInput.value = extractedTitle;
+                        }
+                    }
+                }
+
                 this.saveCurrentApp();
                 this.refreshStudioPreview();
             }
 
-            let rawExplanation = fullStreamedText.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').trim();
-            if (rawExplanation.includes('<GenerateApp')) rawExplanation = rawExplanation.split('<GenerateApp')[0];
-            if (rawExplanation.includes('<GenerateWidget')) rawExplanation = rawExplanation.split('<GenerateWidget')[0];
-            if (rawExplanation.includes('<PatchApp')) rawExplanation = rawExplanation.split('<PatchApp')[0];
-            if (rawExplanation.includes('<PatchWidget')) rawExplanation = rawExplanation.split('<PatchWidget')[0];
-            if (rawExplanation.includes('```')) rawExplanation = rawExplanation.split('```')[0];
-            rawExplanation = rawExplanation.trim();
+            let rawExplanation = fullStreamedText
+                .replace(/<(?:think|thought)>[\s\S]*?(?:<\/(?:think|thought)>|$)/gi, '')
+                .replace(/<(?:GenerateApp|GenerateWidget|PatchApp|PatchWidget)[^>]*>[\s\S]*?(?:<\/(?:GenerateApp|GenerateWidget|PatchApp|PatchWidget)>|$)/gi, '')
+                .replace(/<<<<<<< SEARCH[\s\S]*?>>>>>>> REPLACE/gi, '')
+                .trim();
 
             const isCodeGenerated = !!(cleanCode && cleanCode !== currentCode) || fullStreamedText.includes('<GenerateApp') || fullStreamedText.includes('<GenerateWidget') || fullStreamedText.includes('<PatchApp') || fullStreamedText.includes('<PatchWidget') || fullStreamedText.includes('<<<<<<< SEARCH');
-            let finalExplanation = rawExplanation || (isCodeGenerated ? (isNewApp ? 'Application created and verified.' : 'Application updated and verified.') : fullStreamedText.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').trim());
+            let finalExplanation = rawExplanation || (isCodeGenerated ? (isNewApp ? 'Application created and verified.' : 'Application updated and verified.') : 'Done.');
 
             // Await 500ms to test runtime execution in sandbox
             await new Promise(r => setTimeout(r, 500));
@@ -2036,19 +2114,35 @@ export class AppsPanel {
             if (this.lastSandboxError) {
                 const runtimeErr = this.lastSandboxError;
                 console.warn('[AppsStudio] Sandbox error detected, initiating autonomous repair loop:', runtimeErr);
-                
-                const repairPrompt = `Current App Code:\n\`\`\`html\n${this.currentApp.code}\n\`\`\`\n\nA runtime error occurred in the sandbox execution:\nError: ${runtimeErr.message || 'Unknown error'}\n${runtimeErr.stack ? 'Stack: ' + runtimeErr.stack : ''}\n\nPlease fix this error and provide the updated complete or patched working HTML/JS/CSS code.`;
+
+                const repairPrompt = `Current App Code:\n\`\`\`html\n${this.currentApp.code}\n\`\`\`\n\nA runtime error occurred in the sandbox execution:\nError: ${runtimeErr.message || 'Unknown error'}\n${runtimeErr.stack ? 'Stack: ' + runtimeErr.stack : ''}\n\nPlease fix this error and provide the updated complete or patched working HTML/JS/CSS code, along with a brief explanation of what was fixed.`;
 
                 try {
                     const healStreamed = await executeStreamTurn(
-                        APP_BUILDER_SYSTEM_PROMPT, 
-                        repairPrompt, 
+                        APP_BUILDER_SYSTEM_PROMPT,
+                        repairPrompt,
                         `Auto-fixing runtime error: ${runtimeErr.message || 'Unknown error'}`
                     );
+                    const healExplanation = healStreamed
+                        .replace(/<(?:think|thought)>[\s\S]*?(?:<\/(?:think|thought)>|$)/gi, '')
+                        .replace(/<(?:GenerateApp|GenerateWidget|PatchApp|PatchWidget)[^>]*>[\s\S]*?(?:<\/(?:GenerateApp|GenerateWidget|PatchApp|PatchWidget)>|$)/gi, '')
+                        .replace(/<<<<<<< SEARCH[\s\S]*?>>>>>>> REPLACE/gi, '')
+                        .trim();
+                    if (healExplanation) {
+                        finalExplanation += `\n\n${healExplanation}`;
+                    }
                     const healedCode = WidgetRunner.extractWidgetCode(healStreamed, this.currentApp.code);
                     if (healedCode && healedCode.length > 20) {
                         this.currentApp.code = healedCode;
                         this.updateCodeView(healedCode);
+                        const healTitleMatch = healedCode.match(/<title[^>]*>([^<]+)<\/title>/i) || healStreamed.match(/<GenerateApp[^>]*title=["']([^"']+)["']/i);
+                        if (healTitleMatch && healTitleMatch[1]) {
+                            const healTitle = healTitleMatch[1].trim().replace(/^["']|["']$/g, '').trim();
+                            if (healTitle) {
+                                this.currentApp.name = healTitle;
+                                if (this.studioTitleInput) this.studioTitleInput.value = healTitle;
+                            }
+                        }
                         this.saveCurrentApp();
                         this.refreshStudioPreview();
                     }
@@ -2090,6 +2184,7 @@ export class AppsPanel {
             });
 
             this.renderChatMessages();
+            this.saveCurrentApp();
 
         } catch (err) {
             console.error('[AppsStudio Error]', err);
@@ -2127,11 +2222,15 @@ export class AppsPanel {
         }
     }
 
-    saveCurrentApp(notify = false) {
-        if (!this.currentApp) return;
+    async saveCurrentApp(notify = false) {
+        if (!this.currentApp || this.currentApp.isBuiltin) return;
         this.currentApp.updatedAt = Date.now();
         this.customApps[this.currentApp.id] = this.currentApp;
-        this.saveCustomApps();
+        await NexusAppsDB.putApp(this.currentApp);
+        this.syncTitleCache();
+        if (typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
+            NexusSync.triggerDebouncedSync();
+        }
     }
 
     exportAppHtml() {
@@ -2147,12 +2246,17 @@ export class AppsPanel {
         URL.revokeObjectURL(url);
     }
 
-    deleteCurrentApp() {
+    async deleteCurrentApp() {
         if (!this.currentApp) return;
         const confirmed = confirm(`Are you sure you want to delete "${this.currentApp.name}"?`);
         if (confirmed) {
-            delete this.customApps[this.currentApp.id];
-            this.saveCustomApps();
+            const appId = this.currentApp.id;
+            delete this.customApps[appId];
+            await NexusAppsDB.deleteApp(appId);
+            this.syncTitleCache();
+            if (typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
+                NexusSync.triggerDebouncedSync();
+            }
             this.showHubView();
         }
     }

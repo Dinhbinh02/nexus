@@ -7,3 +7,5 @@ export * from './tts_manager.js';
 export * from './drive_sync.js';
 export * from './google_auth.js';
 export * from './sync_debugger.js';
+export * from './apps_db.js';
+

@@ -1,38 +1,21 @@
 export const StorageService = {
     async get(keys, area = 'sync') {
-        const storageArea = (chrome?.storage && chrome.storage[area]) ? chrome.storage[area] : chrome?.storage?.local;
-        if (!storageArea) return {};
-        return new Promise((resolve) => {
-            storageArea.get(keys, (items) => {
-                if (chrome.runtime.lastError) {
-                    chrome?.storage?.local?.get(keys, (localItems) => resolve(localItems || {}));
-                } else {
-                    resolve(items || {});
-                }
-            });
-        });
+        const storage = chrome?.storage?.[area] || chrome?.storage?.local;
+        return storage ? (await storage.get(keys)) || {} : {};
     },
 
     async set(items, area = 'sync') {
-        const storageArea = (chrome?.storage && chrome.storage[area]) ? chrome.storage[area] : chrome?.storage?.local;
-        if (!storageArea) return false;
-        return new Promise((resolve) => {
-            storageArea.set(items, () => {
-                if (chrome.runtime.lastError) {
-                    chrome?.storage?.local?.set(items, () => resolve(true));
-                } else {
-                    resolve(true);
-                }
-            });
-        });
+        const storage = chrome?.storage?.[area] || chrome?.storage?.local;
+        if (!storage) return false;
+        await storage.set(items);
+        return true;
     },
 
     async remove(keys, area = 'sync') {
-        const storageArea = (chrome?.storage && chrome.storage[area]) ? chrome.storage[area] : chrome?.storage?.local;
-        if (!storageArea) return false;
-        return new Promise((resolve) => {
-            storageArea.remove(keys, () => resolve(true));
-        });
+        const storage = chrome?.storage?.[area] || chrome?.storage?.local;
+        if (!storage) return false;
+        await storage.remove(keys);
+        return true;
     },
 
     onChanged(callback) {

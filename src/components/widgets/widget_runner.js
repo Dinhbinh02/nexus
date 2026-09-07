@@ -1,4 +1,5 @@
 import { widgetRegistry } from './widget_registry.js';
+import { NexusAppsDB } from '../../db/apps_db.js';
 
 /**
  * WidgetRunner — Manages generation, sandboxing, and lifecycle for
@@ -258,7 +259,7 @@ export const WidgetRunner = {
         <iframe
           class="nexus-widget-iframe"
           allow="autoplay"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"
+          sandbox="allow-scripts allow-forms allow-popups allow-modals allow-downloads"
           src="${sandboxUrl}"
           data-widget-raw="${encodedCode}"
           data-widget-id="${widgetId}"
@@ -339,6 +340,76 @@ if (typeof window !== 'undefined' && !window.__nexusWidgetSandboxListenerBound) 
     window.__nexusWidgetSandboxListenerBound = true;
     const activeTTSUtterances = new Map();
     const activeAIPorts = new Map();
+    let currentTTSAudioEl = null;
+    let ttsPlaybackSessionId = 0;
+
+    function stopActiveTTS() {
+        ttsPlaybackSessionId++;
+        if (typeof chrome !== 'undefined' && chrome.tts && typeof chrome.tts.stop === 'function') {
+            try { chrome.tts.stop(); } catch (_) {}
+        }
+        if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+            try { window.speechSynthesis.cancel(); } catch (_) {}
+        }
+        if (currentTTSAudioEl) {
+            try {
+                currentTTSAudioEl.pause();
+                currentTTSAudioEl.currentTime = 0;
+                currentTTSAudioEl.src = '';
+                currentTTSAudioEl = null;
+            } catch (_) {}
+        }
+        activeTTSUtterances.clear();
+    }
+
+    WidgetRunner.stopActiveTTS = stopActiveTTS;
+
+    async function playAudioChunks(chunks, speed = 1.0, sessionId) {
+        if (currentTTSAudioEl) {
+            try {
+                currentTTSAudioEl.pause();
+                currentTTSAudioEl.currentTime = 0;
+                currentTTSAudioEl.src = '';
+                currentTTSAudioEl = null;
+            } catch (_) {}
+        }
+        for (const chunk of chunks) {
+            if (sessionId !== undefined && ttsPlaybackSessionId !== sessionId) {
+                return;
+            }
+            await new Promise((resolve) => {
+                let blobUrl = null;
+                try {
+                    if (chunk.startsWith('data:')) {
+                        const parts = chunk.split(',');
+                        const mime = parts[0].split(':')[1].split(';')[0];
+                        const byteString = atob(parts[1]);
+                        const byteArray = new Uint8Array(byteString.length);
+                        for (let i = 0; i < byteString.length; i++) byteArray[i] = byteString.charCodeAt(i);
+                        const blob = new Blob([byteArray], { type: mime });
+                        blobUrl = URL.createObjectURL(blob);
+                    }
+                } catch (_) {}
+
+                if (sessionId !== undefined && ttsPlaybackSessionId !== sessionId) {
+                    if (blobUrl) URL.revokeObjectURL(blobUrl);
+                    resolve();
+                    return;
+                }
+
+                const audio = new Audio(blobUrl || chunk);
+                audio.playbackRate = speed;
+                currentTTSAudioEl = audio;
+                const cleanup = () => {
+                    if (currentTTSAudioEl === audio) currentTTSAudioEl = null;
+                    if (blobUrl) URL.revokeObjectURL(blobUrl);
+                };
+                audio.onended = () => { cleanup(); resolve(); };
+                audio.onerror = () => { cleanup(); resolve(); };
+                audio.play().catch(() => { cleanup(); resolve(); });
+            });
+        }
+    }
 
     function findOptimalVoice(lang = 'zh-CN', preferredName = null) {
         if (typeof window === 'undefined' || !window.speechSynthesis) return null;
@@ -364,7 +435,145 @@ if (typeof window !== 'undefined' && !window.__nexusWidgetSandboxListenerBound) 
         match = voices.find(v => v.lang && v.lang.toLowerCase().startsWith(langPrefix));
         if (match) return match;
 
-        return voices[0] || null;
+        return null;
+    }
+
+    async function playTTSWithFallback({ id, text, lang = 'zh-CN', rate = 0.85, pitch = 1.0, volume = 1.0, voiceName, sourceWindow }) {
+        if (!text) return;
+
+        stopActiveTTS();
+        const sessionId = ttsPlaybackSessionId;
+
+        const isSessionValid = () => sessionId !== undefined && ttsPlaybackSessionId === sessionId;
+
+        const notify = (eventType, extra = {}) => {
+            if (!isSessionValid()) return;
+            try {
+                sourceWindow?.postMessage({
+                    type: 'NEXUS_TTS_EVENT',
+                    id: id,
+                    eventType: eventType,
+                    extra: extra
+                }, '*');
+            } catch (_) {}
+        };
+
+        // 1. Try background high-fidelity audio engine (with 1-week persistent cache & native human audio)
+        let handledByBackground = false;
+        try {
+            if (isSessionValid() && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
+                const result = await chrome.runtime.sendMessage({
+                    action: 'fetchAudio',
+                    text: text,
+                    speed: rate,
+                    lang: lang
+                }).catch(() => null);
+
+                if (result && result.chunks && result.chunks.length > 0) {
+                    handledByBackground = true;
+                    if (isSessionValid()) {
+                        notify('start');
+                        await playAudioChunks(result.chunks, rate, sessionId);
+                        if (isSessionValid()) {
+                            notify('end');
+                        }
+                    }
+                    return;
+                }
+            }
+        } catch (err) {
+            console.warn('[TTS Background Audio Error]', err);
+        }
+
+        // If background engine handled it or if session was cancelled/preempted, STOP immediately!
+        if (handledByBackground || !isSessionValid()) return;
+
+        // 2. Fallback to Native Chrome Extension TTS API (Zero rate limits, official Google neural voices)
+        const playViaChromeTTS = () => {
+            return new Promise((resolve) => {
+                if (!isSessionValid()) return resolve(false);
+                if (typeof chrome !== 'undefined' && chrome.tts && typeof chrome.tts.speak === 'function') {
+                    let hasStarted = false;
+                    try {
+                        chrome.tts.speak(text, {
+                            lang: lang,
+                            rate: Math.max(0.5, Math.min(2.0, rate)),
+                            pitch: Math.max(0.5, Math.min(2.0, pitch)),
+                            volume: Math.max(0, Math.min(1.0, volume)),
+                            onEvent: (event) => {
+                                if (!isSessionValid()) return;
+                                if (event.type === 'start') {
+                                    hasStarted = true;
+                                    notify('start');
+                                } else if (event.type === 'end') {
+                                    notify('end');
+                                    resolve(true);
+                                } else if (event.type === 'error' || event.type === 'cancelled' || event.type === 'interrupted') {
+                                    if (event.type === 'error' && !hasStarted) {
+                                        resolve(false);
+                                    } else {
+                                        if (event.type === 'error') notify('error', { error: event.errorMessage || 'tts_error' });
+                                        resolve(true);
+                                    }
+                                }
+                            }
+                        }, () => {
+                            if (chrome.runtime.lastError) {
+                                resolve(false);
+                            }
+                        });
+                    } catch (_) {
+                        resolve(false);
+                    }
+                } else {
+                    resolve(false);
+                }
+            });
+        };
+
+        const chromeOk = await playViaChromeTTS();
+        if (chromeOk || !isSessionValid()) return;
+
+        // 3. Fallback to Web Speech API
+        const playViaWebSpeech = () => {
+            return new Promise((resolve) => {
+                if (!isSessionValid() || typeof window === 'undefined' || !('speechSynthesis' in window)) return resolve(false);
+                try {
+                    if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+                    const chosenVoice = findOptimalVoice(lang, voiceName);
+                    const utterance = new SpeechSynthesisUtterance(text);
+                    utterance.lang = lang;
+                    utterance.rate = rate;
+                    utterance.pitch = pitch;
+                    utterance.volume = volume;
+                    if (chosenVoice) utterance.voice = chosenVoice;
+
+                    utterance.onstart = () => {
+                        if (!isSessionValid()) return;
+                        notify('start');
+                    };
+                    utterance.onend = () => {
+                        activeTTSUtterances.delete(id);
+                        if (!isSessionValid()) return;
+                        notify('end');
+                        resolve(true);
+                    };
+                    utterance.onerror = (err) => {
+                        activeTTSUtterances.delete(id);
+                        if (!isSessionValid()) return;
+                        notify('error', { error: err?.error || 'speech_error' });
+                        resolve(false);
+                    };
+
+                    activeTTSUtterances.set(id, utterance);
+                    window.speechSynthesis.speak(utterance);
+                } catch (e) {
+                    resolve(false);
+                }
+            });
+        };
+
+        await playViaWebSpeech();
     }
 
     window.addEventListener('message', async (event) => {
@@ -382,13 +591,9 @@ if (typeof window !== 'undefined' && !window.__nexusWidgetSandboxListenerBound) 
                     const appId = iframe.getAttribute('data-widget-id') || 'default_app';
 
                     let storedData = {};
-                    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-                        try {
-                            const storageKey = `nexus_sandbox_${appId}`;
-                            const res = await chrome.storage.local.get([storageKey]);
-                            if (res[storageKey]) storedData = res[storageKey];
-                        } catch (_) {}
-                    }
+                    try {
+                        storedData = await NexusAppsDB.getSandboxData(appId).catch(() => ({}));
+                    } catch (_) {}
 
                     if (rawEncoded) {
                         const rawCode = decodeURIComponent(rawEncoded);
@@ -420,35 +625,28 @@ if (typeof window !== 'undefined' && !window.__nexusWidgetSandboxListenerBound) 
             });
         }
 
-        // 3. Persistent Storage Synchronizer
+        // 3. Persistent Storage Synchronizer (IndexedDB Native)
         if (event.data.type === 'NEXUS_STORAGE_SET') {
             const { appId = 'default_app', key, value } = event.data;
-            if (typeof chrome !== 'undefined' && chrome.storage?.local && key) {
-                const storageKey = `nexus_sandbox_${appId}`;
-                chrome.storage.local.get([storageKey], (res) => {
-                    const store = res[storageKey] || {};
+            if (key) {
+                NexusAppsDB.getSandboxData(appId).then(store => {
                     store[key] = value;
-                    chrome.storage.local.set({ [storageKey]: store });
-                });
+                    NexusAppsDB.setSandboxData(appId, store);
+                }).catch(() => {});
             }
         }
         if (event.data.type === 'NEXUS_STORAGE_REMOVE') {
             const { appId = 'default_app', key } = event.data;
-            if (typeof chrome !== 'undefined' && chrome.storage?.local && key) {
-                const storageKey = `nexus_sandbox_${appId}`;
-                chrome.storage.local.get([storageKey], (res) => {
-                    const store = res[storageKey] || {};
+            if (key) {
+                NexusAppsDB.getSandboxData(appId).then(store => {
                     delete store[key];
-                    chrome.storage.local.set({ [storageKey]: store });
-                });
+                    NexusAppsDB.setSandboxData(appId, store);
+                }).catch(() => {});
             }
         }
         if (event.data.type === 'NEXUS_STORAGE_CLEAR') {
             const { appId = 'default_app' } = event.data;
-            if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-                const storageKey = `nexus_sandbox_${appId}`;
-                chrome.storage.local.remove([storageKey]);
-            }
+            NexusAppsDB.clearSandboxData(appId).catch(() => {});
         }
 
         // 4. Cross-Origin Fetch Bridge
@@ -500,76 +698,39 @@ if (typeof window !== 'undefined' && !window.__nexusWidgetSandboxListenerBound) 
             }
         }
 
-        // 6. Speech Synthesis Bridge (Parent Execution)
+        // 6. Speech Synthesis Bridge (Parent Execution with Auto-Fallback Engine)
         if (event.data.type === 'NEXUS_TTS_SPEAK' && event.data.text) {
             const { id, text, lang = 'zh-CN', rate = 0.85, pitch = 1.0, volume = 1.0, voiceName } = event.data;
-            if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-                if (window.speechSynthesis.paused) {
-                    window.speechSynthesis.resume();
-                }
-
-                const utterance = new SpeechSynthesisUtterance(text);
-                utterance.lang = lang;
-                utterance.rate = rate;
-                utterance.pitch = pitch;
-                utterance.volume = volume;
-
-                const chosenVoice = findOptimalVoice(lang, voiceName);
-                if (chosenVoice) {
-                    utterance.voice = chosenVoice;
-                }
-
-                utterance.onstart = () => {
-                    try {
-                        event.source?.postMessage({
-                            type: 'NEXUS_TTS_EVENT',
-                            id: id,
-                            eventType: 'start'
-                        }, '*');
-                    } catch (_) {}
-                };
-
-                utterance.onend = () => {
-                    activeTTSUtterances.delete(id);
-                    try {
-                        event.source?.postMessage({
-                            type: 'NEXUS_TTS_EVENT',
-                            id: id,
-                            eventType: 'end'
-                        }, '*');
-                    } catch (_) {}
-                };
-
-                utterance.onerror = (err) => {
-                    activeTTSUtterances.delete(id);
-                    try {
-                        event.source?.postMessage({
-                            type: 'NEXUS_TTS_EVENT',
-                            id: id,
-                            eventType: 'error',
-                            extra: { error: err?.error || 'speech_error' }
-                        }, '*');
-                    } catch (_) {}
-                };
-
-                activeTTSUtterances.set(id, utterance);
-                window.speechSynthesis.speak(utterance);
-            }
+            playTTSWithFallback({
+                id,
+                text,
+                lang,
+                rate,
+                pitch,
+                volume,
+                voiceName,
+                sourceWindow: event.source
+            }).catch(err => {
+                console.warn('[TTS Host Bridge Error]', err);
+            });
         }
 
         // 7. Cancel / Pause / Resume Speech Synthesis
         if (event.data.type === 'NEXUS_TTS_CANCEL') {
-            if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-                activeTTSUtterances.clear();
-                window.speechSynthesis.cancel();
-            }
+            stopActiveTTS();
         }
         if (event.data.type === 'NEXUS_TTS_PAUSE') {
+            if (currentTTSAudioEl) {
+                try { currentTTSAudioEl.pause(); } catch (_) {}
+            }
             if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
                 window.speechSynthesis.pause();
             }
         }
         if (event.data.type === 'NEXUS_TTS_RESUME') {
+            if (currentTTSAudioEl) {
+                try { currentTTSAudioEl.play(); } catch (_) {}
+            }
             if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
                 window.speechSynthesis.resume();
             }

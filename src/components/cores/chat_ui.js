@@ -34,20 +34,32 @@ export class NexusChatUI {
         `;
         const getChatUI = () => {
             const histEl = questionDiv.closest('.nexus-chat-history, .nexus-chat-scroll-content');
-            return histEl?.__uiInstance || window.ui || (window.currentPopup?.__uiInstance) || (window.tabs && window.tabs.find(t => t.historyEl === histEl)?.chatUIInstance) || (window.sharedInputUI);
+            return histEl?.__uiInstance ||
+                   questionDiv.closest('.nexus-workspace-tab-panel, .nexus-workspace-primary-container, .layout, .nexus-chat-container')?.__uiInstance ||
+                   window.ui ||
+                   (window.currentPopup?.__uiInstance) ||
+                   (window.tabs && window.tabs.find(t => t.historyEl === histEl || (t.historyEl && t.historyEl.contains(questionDiv)))?.chatUIInstance) ||
+                   (window.tabs && typeof window.activeTabIndex !== 'undefined' && window.tabs[window.activeTabIndex]?.chatUIInstance) ||
+                   (window.tabs && window.tabs[0]?.chatUIInstance) ||
+                   (window.sharedInputUI) ||
+                   (window.chatUI);
         };
         actionsRow.querySelector('.btn-undo').onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
             const entry = questionDiv.closest('.nexus-entry');
             const chatUI = getChatUI();
-            if (chatUI) chatUI._undoEditAndTruncate(entry, 'question', questionDiv, null);
+            if (chatUI && typeof chatUI._undoEditAndTruncate === 'function') {
+                chatUI._undoEditAndTruncate(entry, 'question', questionDiv, null);
+            }
         };
         actionsRow.querySelector('.btn-copy').onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const text = questionDiv.getAttribute('data-raw-text') || questionDiv.textContent;
-            navigator.clipboard.writeText(text);
+            const text = questionDiv.getAttribute('data-raw-text') || questionDiv.querySelector('.nexus-question-content')?.textContent || questionDiv.textContent || '';
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text.trim());
+            }
             const btn = actionsRow.querySelector('.btn-copy');
             const originalHTML = btn.innerHTML;
             btn.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
@@ -57,7 +69,13 @@ export class NexusChatUI {
             e.preventDefault();
             e.stopPropagation();
             const chatUI = getChatUI();
-            if (chatUI) chatUI.enterQuestionEditMode(questionDiv);
+            if (chatUI && typeof chatUI.enterQuestionEditMode === 'function') {
+                chatUI.enterQuestionEditMode(questionDiv);
+            } else if (typeof NexusChatUI !== 'undefined' && typeof NexusChatUI.prototype.enterQuestionEditMode === 'function') {
+                const dummyUI = new NexusChatUI(null, { autoRender: false, skipInputSetup: true });
+                dummyUI.historyEl = questionDiv.closest('.nexus-chat-history, .nexus-chat-scroll-content');
+                dummyUI.enterQuestionEditMode(questionDiv);
+            }
         };
         row.appendChild(actionsRow);
         NexusChatUI.checkQuestionOverflow(questionDiv);

@@ -50,7 +50,7 @@ export async function fetchAudio(text, speed = 1.0, forcedLang = null) {
         const regex = new RegExp(`\\b${acronym}\\b`, 'gi');
         normalizedText = normalizedText.replace(regex, acronym.toUpperCase().split('').join(' '));
     });
-    const wordCount = normalizedText.split(/\s+/).length;
+
     const detectLanguage = (t) => {
         let counts = { vietnamese: 0, chinese: 0, japanese: 0, korean: 0, cyrillic: 0, latin: 0 };
         const vietnameseRegex = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/gi;
@@ -71,34 +71,77 @@ export async function fetchAudio(text, speed = 1.0, forcedLang = null) {
         if (dominant[0] === 'latin' && counts.vietnamese > 0 && counts.vietnamese / counts.latin > 0.15) return 'vi';
         return langMap[dominant[0]] || 'en-GB';
     };
-    const lang = forcedLang || detectLanguage(normalizedText);
+
+    let lang = (forcedLang || detectLanguage(normalizedText)).trim();
+    const langLower = lang.toLowerCase();
+    if (langLower.startsWith('zh')) lang = 'zh-CN';
+    else if (langLower.startsWith('en')) lang = 'en-GB';
+    else if (langLower.startsWith('ja')) lang = 'ja';
+    else if (langLower.startsWith('ko')) lang = 'ko';
+    else if (langLower.startsWith('vi')) lang = 'vi';
+    else if (langLower.startsWith('fr')) lang = 'fr';
+    else if (langLower.startsWith('es')) lang = 'es';
+    else if (langLower.startsWith('de')) lang = 'de';
+    else if (langLower.startsWith('ru')) lang = 'ru';
+    else if (langLower.startsWith('it')) lang = 'it';
+    else if (langLower.startsWith('pt')) lang = 'pt';
+
+    // 1. Check 1-Week Persistent Audio Cache First
+    const speedKey = Math.round((speed || 1.0) * 100);
+    const cacheKey = `${lang}_${speedKey}_${normalizedText.toLowerCase()}`;
+    const cachedEntry = await getAudioFromCache(cacheKey);
+    if (cachedEntry && Array.isArray(cachedEntry.data) && cachedEntry.data.length > 0) {
+        return { type: cachedEntry.type || 'cached', chunks: cachedEntry.data };
+    }
+
     const fetchToBase64 = async (url, opts = {}) => {
         const response = await fetch(url, opts);
         if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
         const contentType = response.headers.get('Content-Type');
-        if (contentType && !contentType.includes('audio') && !contentType.includes('mpeg')) throw new Error('Invalid content type');
+        if (contentType && !contentType.includes('audio') && !contentType.includes('mpeg') && !contentType.includes('octet-stream')) {
+            throw new Error('Invalid content type');
+        }
         const arrayBuffer = await response.arrayBuffer();
         if (arrayBuffer.byteLength < 100) throw new Error('Empty audio');
         const base64 = btoa(new Uint8Array(arrayBuffer).reduce((d, byte) => d + String.fromCharCode(byte), ''));
         return `data:audio/mpeg;base64,${base64}`;
     };
+
     const stripListPrefix = (q) =>
         q.replace(/^\s*(?:[a-zA-Z\d]{1,2}\)|[a-zA-Z\d]{1,2}\.|[•\-–—])\s+/, '').trim();
+
+    // High quality provider endpoints
     const googleUrl = (q) => {
         const cleaned = stripListPrefix(q);
-        return `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(cleaned)}&tl=${lang}&total=1&idx=0&textlen=${cleaned.length}&client=gtx&prev=input&ttsspeed=${speed}`;
+        return `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(cleaned)}&tl=${lang}&total=1&idx=0&textlen=${cleaned.length}&client=tw-ob&ttsspeed=${speed}`;
     };
-    const MAX_CHUNK_CHARS = 200;
+
+    const youdaoUrl = (q) => {
+        const cleaned = stripListPrefix(q);
+        let le = 'zh';
+        if (lang === 'zh-CN') le = 'zh';
+        else if (lang === 'ja') le = 'jap';
+        else if (lang === 'ko') le = 'ko';
+        else if (lang === 'fr') le = 'fr';
+        else if (lang === 'es') le = 'es';
+        else if (lang === 'de') le = 'de';
+        else if (lang.startsWith('en')) {
+            return `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(cleaned)}&type=2`;
+        }
+        return `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(cleaned)}&le=${le}`;
+    };
+
+    const MAX_CHUNK_CHARS = 180;
     const splitIntoChunks = (text) => {
-        const sentences = text.match(/[^.?!]+[.?!]+/g) || [];
+        const sentences = text.match(/[^.?!。？！\n]+[.?!。？！\n]+/g) || [];
         const lastSentenceEnd = sentences.reduce((acc, s) => acc + s.length, 0);
         if (lastSentenceEnd < text.length) sentences.push(text.slice(lastSentenceEnd).trim());
-        const level1 = sentences.map(s => s.trim()).filter(s => s.replace(/[.?!,;:]/g, '').trim().length >= 2);
-        const base = level1.length >= 2 ? level1 : [text];
+        const level1 = sentences.map(s => s.trim()).filter(s => s.replace(/[.?!,;:。？！，、]/g, '').trim().length >= 1);
+        const base = level1.length >= 1 ? level1 : [text];
         const level2 = [];
         for (const chunk of base) {
             if (chunk.length <= MAX_CHUNK_CHARS) { level2.push(chunk); continue; }
-            const clauses = chunk.split(/(?<=[,;–—])\s+/);
+            const clauses = chunk.split(/(?<=[,;–—，、；])\s*/);
             if (clauses.length >= 2) {
                 let current = '';
                 for (const clause of clauses) {
@@ -114,7 +157,7 @@ export async function fetchAudio(text, speed = 1.0, forcedLang = null) {
                 level2.push(chunk);
             }
         }
-        const WORDS_PER_CHUNK = 25;
+        const WORDS_PER_CHUNK = 20;
         const final = [];
         for (const chunk of level2) {
             if (chunk.length <= MAX_CHUNK_CHARS) { final.push(chunk); continue; }
@@ -125,35 +168,72 @@ export async function fetchAudio(text, speed = 1.0, forcedLang = null) {
         }
         return final.filter(Boolean);
     };
-    const fetchGoogle = async () => {
+
+    let chunks = [];
+    let providerType = 'google';
+    const wordCount = normalizedText.split(/\s+/).length;
+    const supportsYoudao = ['zh-CN', 'ja', 'ko', 'fr', 'es', 'de', 'en-GB'].includes(lang) && normalizedText.length < 200;
+
+    // 2. High-Fidelity Audio Engine for Top Languages
+    if (lang === 'zh-CN') {
+        // Native Standard Mandarin stream (crystal clear tonal inflection & human pronunciation)
         try {
-            const data = await fetchToBase64(googleUrl(normalizedText), { referrerPolicy: 'no-referrer' });
-            return [data];
-        } catch (e) {
-            if (e.status !== 400) return [];
-        }
-        const chunks = splitIntoChunks(normalizedText);
-        const results = new Array(chunks.length).fill(null);
-        await Promise.all(chunks.map(async (chunk, i) => {
-            try { results[i] = await fetchToBase64(googleUrl(chunk), { referrerPolicy: 'no-referrer' }); }
-            catch (e) { results[i] = null; }
-        }));
-        return results.filter(Boolean);
-    };
-    if (wordCount <= 2) {
+            const ydData = await fetchToBase64(youdaoUrl(normalizedText), { referrerPolicy: 'no-referrer' });
+            if (ydData) {
+                chunks = [ydData];
+                providerType = 'youdao_mandarin';
+            }
+        } catch (_) {}
+    } else if (lang === 'en-GB' && wordCount <= 2) {
+        // Studio Oxford dictionary pronunciation
         const audioText = getAmericanSpelling(normalizedText);
         const oxfordUrl = `https://ssl.gstatic.com/dictionary/static/sounds/oxford/${audioText.toLowerCase()}--_gb_1.mp3`;
-        const oxfordPromise = fetchToBase64(oxfordUrl).catch(() => null);
-        const googlePromise = fetchGoogle();
-        const oxfordData = await oxfordPromise;
-        if (oxfordData) {
-            return { type: 'oxford', chunks: [oxfordData] };
-        }
-        const googleChunks = await googlePromise;
-        return { type: 'google', chunks: googleChunks };
+        try {
+            const oxData = await fetchToBase64(oxfordUrl, { referrerPolicy: 'no-referrer' });
+            if (oxData) {
+                chunks = [oxData];
+                providerType = 'oxford';
+            }
+        } catch (_) {}
+    } else if (supportsYoudao && wordCount <= 15) {
+        try {
+            const ydData = await fetchToBase64(youdaoUrl(normalizedText), { referrerPolicy: 'no-referrer' });
+            if (ydData) {
+                chunks = [ydData];
+                providerType = 'youdao';
+            }
+        } catch (_) {}
     }
-    const googleChunks = await fetchGoogle();
-    return { type: 'google', chunks: googleChunks };
+
+    // 3. Fallback to Google Web TTS (client=tw-ob)
+    if (chunks.length === 0) {
+        try {
+            const gData = await fetchToBase64(googleUrl(normalizedText), { referrerPolicy: 'no-referrer' });
+            if (gData) {
+                chunks = [gData];
+                providerType = 'google_tts';
+            }
+        } catch (e) {
+            const splitChunks = splitIntoChunks(normalizedText);
+            const results = new Array(splitChunks.length).fill(null);
+            await Promise.all(splitChunks.map(async (chunk, i) => {
+                try {
+                    results[i] = await fetchToBase64(googleUrl(chunk), { referrerPolicy: 'no-referrer' });
+                } catch (_) {
+                    results[i] = null;
+                }
+            }));
+            chunks = results.filter(Boolean);
+            providerType = 'google_tts_chunked';
+        }
+    }
+
+    // 4. Save to 1-Week Persistent Audio Cache
+    if (chunks.length > 0) {
+        setAudioCache(cacheKey, providerType, chunks).catch(() => {});
+    }
+
+    return { type: providerType, chunks };
 }
 
 export async function getAudioFromCache(text) {

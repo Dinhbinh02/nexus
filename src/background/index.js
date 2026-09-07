@@ -1,4 +1,4 @@
-import { NexusImageCacheDB, NexusAudioCacheDB } from '../db/attachment_db.js';
+import { NexusCacheDB } from '../db/attachment_db.js';
 import { initSidePanelManager, toggleSidePanel, ensureSidePanelOpen } from './sidepanel_service.js';
 import { detectMediaType, processAttachments, processAttachmentsForGemini, readOpfsFileAsBase64 } from './attachment_processor.js';
 import { fetchAudio, stopGoogleAudioOffscreen, getLemma, getAmericanSpelling, initAudioHandlers } from './tts_service.js';
@@ -28,7 +28,6 @@ initSyncHandlers();
 initChatStreamService();
 initAudioHandlers();
 
-// Cache cleanup for expired attachments & audio
-NexusImageCacheDB.cleanupExpired().catch(() => {});
-NexusAudioCacheDB.cleanupExpired().catch(() => {});
+// Cache cleanup for expired image queries & audio entries
+NexusCacheDB.cleanupExpired().catch(() => {});
 

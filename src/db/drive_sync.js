@@ -1,4 +1,9 @@
 import { NexusAuth, AuthService } from './google_auth.js';
+import { NexusChatDB } from './chat_db.js';
+import { NotesManager } from './notes_manager.js';
+import { TTSDB } from './tts_manager.js';
+import { NexusAttachmentDB } from './attachment_db.js';
+import { NexusAppsDB } from './apps_db.js';
 
 // --- Crypto & Compression Helpers ---
 export async function compressData(string) {
@@ -391,6 +396,14 @@ export class SyncManager {
             }
         }
 
+        if (typeof NexusAppsDB !== 'undefined') {
+            try {
+                localData.nexus_custom_apps = await NexusAppsDB.getAllAppsMap();
+            } catch (err) {
+                console.error('[Sync] Failed to load apps from IndexedDB:', err);
+            }
+        }
+
         return localData;
     }
 
@@ -549,6 +562,28 @@ export class SyncManager {
                     }
                 } catch (err) {
                     console.error('[Sync] Failed to apply notes from cloud:', err);
+                }
+            }
+
+            if (typeof NexusAppsDB !== 'undefined') {
+                try {
+                    const remoteApps = remoteData.nexus_custom_apps || remoteData.lumina_custom_apps;
+                    if (remoteApps && typeof remoteApps === 'object') {
+                        const currentApps = await NexusAppsDB.getAllAppsMap().catch(() => ({}));
+                        const remoteAppIds = new Set(Object.keys(remoteApps));
+                        for (const appId of Object.keys(currentApps)) {
+                            if (!remoteAppIds.has(appId)) {
+                                await NexusAppsDB.deleteApp(appId).catch(() => {});
+                            }
+                        }
+                        for (const app of Object.values(remoteApps)) {
+                            if (app && app.id) {
+                                await NexusAppsDB.putApp(app).catch(() => {});
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.error('[Sync] Failed to apply apps from cloud:', err);
                 }
             }
 

@@ -2,7 +2,7 @@ export class ShadowHostManager {
     constructor() {
         this.nexusHost = null;
         this.nexusShadowRoot = null;
-        this.dictPlusObserver = null;
+        this.themeObserver = null;
         this.cachedTheme = null;
         this.cachedAccent = null;
         this.cachedContrast = null;
@@ -95,9 +95,9 @@ export class ShadowHostManager {
     }
 
     initThemeObserver() {
-        if (this.dictPlusObserver || !this.nexusShadowRoot) return;
+        if (this.themeObserver || !this.nexusShadowRoot) return;
         let debounceTimer = null;
-        this.dictPlusObserver = new MutationObserver((mutations) => {
+        this.themeObserver = new MutationObserver((mutations) => {
             const hasTopLevelChange = mutations.some(m =>
                 m.type === 'childList' && m.addedNodes.length &&
                 m.target === this.nexusShadowRoot
@@ -109,6 +109,6 @@ export class ShadowHostManager {
                 this.updateTheme();
             }, 200);
         });
-        this.dictPlusObserver.observe(this.nexusShadowRoot, { childList: true, subtree: true });
+        this.themeObserver.observe(this.nexusShadowRoot, { childList: true, subtree: true });
     }
 }

@@ -32,13 +32,6 @@ export async function runNexusMigrations() {
     }
 
     const MIGRATION_FLAG = 'nexus_session_migrated_v7';
-    const PREV_MIGRATION_FLAGS = [
-        'nexus_session_migrated_v2', 
-        'nexus_session_migrated_v3', 
-        'nexus_session_migrated_v4', 
-        'nexus_session_migrated_v5',
-        'nexus_session_migrated_v6'
-    ];
     
     const flagResult = await chrome.storage.local.get([MIGRATION_FLAG]);
     if (flagResult[MIGRATION_FLAG]) {
@@ -47,21 +40,13 @@ export async function runNexusMigrations() {
     
     try {
         const allData = await chrome.storage.local.get(null);
-        const keysToRemove = [...PREV_MIGRATION_FLAGS];
-        
-        const serializeHighlight = (h) => {
-            if (!h || !h.rangeData) return null;
-            return [
-                h.id,
-                h.color,
-                Array.isArray(h.rangeData.startPath) ? h.rangeData.startPath.join('/') : '',
-                h.rangeData.startOffset,
-                Array.isArray(h.rangeData.endPath) ? h.rangeData.endPath.join('/') : '',
-                h.rangeData.endOffset,
-                h.rangeData.text || '',
-                h.timestamp || Date.now()
-            ];
-        };
+        const keysToRemove = [
+            'nexus_session_migrated_v2', 
+            'nexus_session_migrated_v3', 
+            'nexus_session_migrated_v4', 
+            'nexus_session_migrated_v5',
+            'nexus_session_migrated_v6'
+        ];
         
         for (const key of Object.keys(allData)) {
             if (

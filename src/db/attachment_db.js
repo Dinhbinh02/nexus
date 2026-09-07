@@ -185,51 +185,83 @@ export const NexusAttachmentDB = {
     }
 };
 
-export const NexusImageCacheDB = {
-    DB_NAME: 'NexusImageCacheDB',
+export const NexusCacheDB = {
+    DB_NAME: 'NexusCacheDB',
     DB_VERSION: 1,
-    STORE_NAME: 'image_queries',
+    IMAGE_STORE: 'image_queries',
+    AUDIO_STORE: 'audio_entries',
     _db: null,
+    _migrated: false,
+
     init() {
         return new Promise((resolve, reject) => {
             if (this._db) return resolve(this._db);
             const request = indexedDB.open(this.DB_NAME, this.DB_VERSION);
             request.onupgradeneeded = (e) => {
                 const db = e.target.result;
-                if (!db.objectStoreNames.contains(this.STORE_NAME)) {
-                    db.createObjectStore(this.STORE_NAME);
+                if (!db.objectStoreNames.contains(this.IMAGE_STORE)) {
+                    db.createObjectStore(this.IMAGE_STORE);
+                }
+                if (!db.objectStoreNames.contains(this.AUDIO_STORE)) {
+                    db.createObjectStore(this.AUDIO_STORE);
                 }
             };
-            request.onsuccess = (e) => {
+            request.onsuccess = async (e) => {
                 this._db = e.target.result;
                 this._db.onclose = () => { this._db = null; };
                 this._db.onversionchange = () => { if (this._db) { this._db.close(); this._db = null; } };
+                if (!this._migrated) {
+                    this._migrated = true;
+                    this._migrateLegacyDatabases().catch(() => {});
+                }
                 resolve(this._db);
             };
             request.onerror = (e) => reject(e.target.error);
         });
     },
-    async put(key, value) {
+
+    async _migrateLegacyDatabases() {
+        try {
+            if (typeof indexedDB !== 'undefined') {
+                if (typeof indexedDB.databases === 'function') {
+                    const dbs = await indexedDB.databases().catch(() => []);
+                    if (dbs.some(d => d.name === 'NexusImageCacheDB')) {
+                        try { indexedDB.deleteDatabase('NexusImageCacheDB'); } catch (e) {}
+                    }
+                    if (dbs.some(d => d.name === 'NexusAudioCacheDB')) {
+                        try { indexedDB.deleteDatabase('NexusAudioCacheDB'); } catch (e) {}
+                    }
+                } else {
+                    try { indexedDB.deleteDatabase('NexusImageCacheDB'); } catch (e) {}
+                    try { indexedDB.deleteDatabase('NexusAudioCacheDB'); } catch (e) {}
+                }
+            }
+        } catch (e) {}
+    },
+
+    // --- Image Cache Methods ---
+    async putImage(key, value) {
         const db = await this.init();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.STORE_NAME, 'readwrite');
-            const store = tx.objectStore(this.STORE_NAME);
+            const tx = db.transaction(this.IMAGE_STORE, 'readwrite');
+            const store = tx.objectStore(this.IMAGE_STORE);
             const request = store.put({ value, timestamp: Date.now() }, key);
             request.onsuccess = () => resolve(true);
             request.onerror = (e) => reject(e.target.error);
         });
     },
-    async get(key) {
+
+    async getImage(key) {
         const db = await this.init();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.STORE_NAME, 'readonly');
-            const store = tx.objectStore(this.STORE_NAME);
+            const tx = db.transaction(this.IMAGE_STORE, 'readonly');
+            const store = tx.objectStore(this.IMAGE_STORE);
             const request = store.get(key);
             request.onsuccess = () => {
                 const res = request.result;
                 if (res) {
                     if (Date.now() - res.timestamp > 24 * 60 * 60 * 1000) {
-                        this.delete(key).catch(() => {});
+                        this.deleteImage(key).catch(() => {});
                         resolve(null);
                     } else {
                         resolve(res.value);
@@ -241,95 +273,31 @@ export const NexusImageCacheDB = {
             request.onerror = (e) => reject(e.target.error);
         });
     },
-    async delete(key) {
+
+    async deleteImage(key) {
         const db = await this.init();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.STORE_NAME, 'readwrite');
-            const store = tx.objectStore(this.STORE_NAME);
+            const tx = db.transaction(this.IMAGE_STORE, 'readwrite');
+            const store = tx.objectStore(this.IMAGE_STORE);
             const request = store.delete(key);
             request.onsuccess = () => resolve(true);
             request.onerror = (e) => reject(e.target.error);
         });
     },
-    async clear() {
+
+    async clearImages() {
         const db = await this.init();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.STORE_NAME, 'readwrite');
-            const store = tx.objectStore(this.STORE_NAME);
+            const tx = db.transaction(this.IMAGE_STORE, 'readwrite');
+            const store = tx.objectStore(this.IMAGE_STORE);
             const request = store.clear();
             request.onsuccess = () => resolve(true);
             request.onerror = (e) => reject(e.target.error);
         });
     },
-    async cleanupExpired() {
-        const db = await this.init();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.STORE_NAME, 'readwrite');
-            const store = tx.objectStore(this.STORE_NAME);
-            const request = store.openCursor();
-            const now = Date.now();
-            request.onsuccess = (e) => {
-                const cursor = e.target.result;
-                if (cursor) {
-                    if (now - cursor.value.timestamp > 24 * 60 * 60 * 1000) {
-                        cursor.delete();
-                    }
-                    cursor.continue();
-                } else {
-                    resolve(true);
-                }
-            };
-            request.onerror = (e) => reject(e.target.error);
-        });
-    },
-    async getStorageUsage() {
-        const db = await this.init();
-        let totalBytes = 0;
-        return new Promise((resolve) => {
-            const tx = db.transaction(this.STORE_NAME, 'readonly');
-            const store = tx.objectStore(this.STORE_NAME);
-            const request = store.openCursor();
-            request.onsuccess = (e) => {
-                const cursor = e.target.result;
-                if (cursor) {
-                    const keyStr = JSON.stringify(cursor.key);
-                    const valStr = JSON.stringify(cursor.value);
-                    totalBytes += (keyStr.length + valStr.length) * 2;
-                    cursor.continue();
-                } else {
-                    resolve(totalBytes);
-                }
-            };
-            request.onerror = () => resolve(0);
-        });
-    }
-};
 
-export const NexusAudioCacheDB = {
-    DB_NAME: 'NexusAudioCacheDB',
-    DB_VERSION: 1,
-    STORE_NAME: 'audio_entries',
-    _db: null,
-    init() {
-        return new Promise((resolve, reject) => {
-            if (this._db) return resolve(this._db);
-            const request = indexedDB.open(this.DB_NAME, this.DB_VERSION);
-            request.onupgradeneeded = (e) => {
-                const db = e.target.result;
-                if (!db.objectStoreNames.contains(this.STORE_NAME)) {
-                    db.createObjectStore(this.STORE_NAME);
-                }
-            };
-            request.onsuccess = (e) => {
-                this._db = e.target.result;
-                this._db.onclose = () => { this._db = null; };
-                this._db.onversionchange = () => { if (this._db) { this._db.close(); this._db = null; } };
-                resolve(this._db);
-            };
-            request.onerror = (e) => reject(e.target.error);
-        });
-    },
-    async put(key, entry) {
+    // --- Audio Cache Methods ---
+    async putAudio(key, entry) {
         const db = await this.init();
         let dbValue = { ...entry };
         if (entry && entry.data && Array.isArray(entry.data)) {
@@ -339,24 +307,25 @@ export const NexusAudioCacheDB = {
             }));
         }
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.STORE_NAME, 'readwrite');
-            const store = tx.objectStore(this.STORE_NAME);
+            const tx = db.transaction(this.AUDIO_STORE, 'readwrite');
+            const store = tx.objectStore(this.AUDIO_STORE);
             const request = store.put({ value: dbValue, timestamp: Date.now() }, key);
             request.onsuccess = () => resolve(true);
             request.onerror = (e) => reject(e.target.error);
         });
     },
-    async get(key) {
+
+    async getAudio(key) {
         const db = await this.init();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.STORE_NAME, 'readonly');
-            const store = tx.objectStore(this.STORE_NAME);
+            const tx = db.transaction(this.AUDIO_STORE, 'readonly');
+            const store = tx.objectStore(this.AUDIO_STORE);
             const request = store.get(key);
             request.onsuccess = async () => {
                 const res = request.result;
                 if (res) {
-                    if (Date.now() - res.timestamp > 24 * 60 * 60 * 1000) {
-                        this.delete(key).catch(() => {});
+                    if (Date.now() - res.timestamp > 7 * 24 * 60 * 60 * 1000) {
+                        this.deleteAudio(key).catch(() => {});
                         resolve(null);
                     } else {
                         const entry = { ...res.value };
@@ -382,33 +351,37 @@ export const NexusAudioCacheDB = {
             request.onerror = (e) => reject(e.target.error);
         });
     },
-    async delete(key) {
+
+    async deleteAudio(key) {
         const db = await this.init();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.STORE_NAME, 'readwrite');
-            const store = tx.objectStore(this.STORE_NAME);
+            const tx = db.transaction(this.AUDIO_STORE, 'readwrite');
+            const store = tx.objectStore(this.AUDIO_STORE);
             const request = store.delete(key);
             request.onsuccess = () => resolve(true);
             request.onerror = (e) => reject(e.target.error);
         });
     },
-    async clear() {
+
+    async clearAudio() {
         const db = await this.init();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.STORE_NAME, 'readwrite');
-            const store = tx.objectStore(this.STORE_NAME);
+            const tx = db.transaction(this.AUDIO_STORE, 'readwrite');
+            const store = tx.objectStore(this.AUDIO_STORE);
             const request = store.clear();
             request.onsuccess = () => resolve(true);
             request.onerror = (e) => reject(e.target.error);
         });
     },
+
+    // --- Unified Cleanup & Stats Methods ---
     async cleanupExpired() {
         const db = await this.init();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.STORE_NAME, 'readwrite');
-            const store = tx.objectStore(this.STORE_NAME);
+        const now = Date.now();
+        await new Promise((resolve) => {
+            const tx = db.transaction(this.IMAGE_STORE, 'readwrite');
+            const store = tx.objectStore(this.IMAGE_STORE);
             const request = store.openCursor();
-            const now = Date.now();
             request.onsuccess = (e) => {
                 const cursor = e.target.result;
                 if (cursor) {
@@ -420,17 +393,47 @@ export const NexusAudioCacheDB = {
                     resolve(true);
                 }
             };
-            request.onerror = (e) => reject(e.target.error);
+            request.onerror = () => resolve(false);
         });
+        await new Promise((resolve) => {
+            const tx = db.transaction(this.AUDIO_STORE, 'readwrite');
+            const store = tx.objectStore(this.AUDIO_STORE);
+            const request = store.openCursor();
+            request.onsuccess = (e) => {
+                const cursor = e.target.result;
+                if (cursor) {
+                    if (now - cursor.value.timestamp > 7 * 24 * 60 * 60 * 1000) {
+                        cursor.delete();
+                    }
+                    cursor.continue();
+                } else {
+                    resolve(true);
+                }
+            };
+            request.onerror = () => resolve(false);
+        });
+        return true;
     },
+
     async getStorageUsage() {
         const db = await this.init();
         let totalBytes = 0;
         return new Promise((resolve) => {
-            const tx = db.transaction(this.STORE_NAME, 'readonly');
-            const store = tx.objectStore(this.STORE_NAME);
-            const request = store.openCursor();
-            request.onsuccess = (e) => {
+            const tx = db.transaction([this.IMAGE_STORE, this.AUDIO_STORE], 'readonly');
+            const imgStore = tx.objectStore(this.IMAGE_STORE);
+            const reqImg = imgStore.openCursor();
+            reqImg.onsuccess = (e) => {
+                const cursor = e.target.result;
+                if (cursor) {
+                    const keyStr = JSON.stringify(cursor.key);
+                    const valStr = JSON.stringify(cursor.value);
+                    totalBytes += (keyStr.length + valStr.length) * 2;
+                    cursor.continue();
+                }
+            };
+            const audioStore = tx.objectStore(this.AUDIO_STORE);
+            const reqAudio = audioStore.openCursor();
+            reqAudio.onsuccess = (e) => {
                 const cursor = e.target.result;
                 if (cursor) {
                     const keyStr = JSON.stringify(cursor.key);
@@ -453,17 +456,43 @@ export const NexusAudioCacheDB = {
                         }
                     }
                     cursor.continue();
-                } else {
-                    resolve(totalBytes);
                 }
             };
-            request.onerror = () => resolve(0);
+            tx.oncomplete = () => resolve(totalBytes);
+            tx.onerror = () => resolve(totalBytes);
         });
+    },
+
+    async clearAll() {
+        await Promise.all([this.clearImages(), this.clearAudio()]);
+        return true;
     }
+};
+
+// Aliases for backwards-compatibility:
+export const NexusImageCacheDB = {
+    init: () => NexusCacheDB.init(),
+    put: (key, val) => NexusCacheDB.putImage(key, val),
+    get: (key) => NexusCacheDB.getImage(key),
+    delete: (key) => NexusCacheDB.deleteImage(key),
+    clear: () => NexusCacheDB.clearImages(),
+    cleanupExpired: () => NexusCacheDB.cleanupExpired(),
+    getStorageUsage: () => NexusCacheDB.getStorageUsage()
+};
+
+export const NexusAudioCacheDB = {
+    init: () => NexusCacheDB.init(),
+    put: (key, entry) => NexusCacheDB.putAudio(key, entry),
+    get: (key) => NexusCacheDB.getAudio(key),
+    delete: (key) => NexusCacheDB.deleteAudio(key),
+    clear: () => NexusCacheDB.clearAudio(),
+    cleanupExpired: () => NexusCacheDB.cleanupExpired(),
+    getStorageUsage: () => NexusCacheDB.getStorageUsage()
 };
 
 if (typeof globalThis !== 'undefined') {
     globalThis.NexusAttachmentDB = NexusAttachmentDB;
+    globalThis.NexusCacheDB = NexusCacheDB;
     globalThis.NexusImageCacheDB = NexusImageCacheDB;
     globalThis.NexusAudioCacheDB = NexusAudioCacheDB;
 }

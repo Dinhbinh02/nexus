@@ -5,14 +5,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Nexus Sandbox Runtime</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link
-    href="https://fonts.googleapis.com/css2?family=Google+Sans+Code:ital,wght,MONO@0,300..800,1;1,300..800,1&family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap"
-    rel="stylesheet">
-  <link rel="stylesheet" href="../../lib/katex/katex.min.css">
-  <script src="../../lib/katex/katex.min.js"></script>
-  <script src="../../lib/katex/auto-render.min.js"></script>
+  <link rel="stylesheet" href="../../lib/katex/katex.min.css" media="print" onload="this.media='all'">
+  <script src="../../lib/katex/katex.min.js" defer></script>
+  <script src="../../lib/katex/auto-render.min.js" defer></script>
   <style id="theme-style">
     :root {
       font-size: 14px;
@@ -503,6 +498,24 @@
       const activeUtterances = new Map();
       let utteranceCounter = 0;
 
+      function dispatchUtteranceEvent(utt, type, extra = {}) {
+        if (!utt) return;
+        if (typeof utt._dispatch === 'function') {
+          try { utt._dispatch(type, extra); } catch (_) {}
+          return;
+        }
+        try {
+          const evt = new CustomEvent(type, { detail: extra });
+          Object.assign(evt, extra);
+          if (typeof utt['on' + type] === 'function') {
+            try { utt['on' + type](evt); } catch (err) { console.warn('[TTS Callback Error]', err); }
+          }
+          if (typeof utt.dispatchEvent === 'function') {
+            try { utt.dispatchEvent(evt); } catch (_) {}
+          }
+        } catch (_) {}
+      }
+
       class NexusUtterance extends EventTarget {
         constructor(text = '') {
           super();
@@ -523,18 +536,13 @@
         }
 
         _dispatch(type, extra = {}) {
-          const evt = new CustomEvent(type, { detail: extra });
-          Object.assign(evt, extra);
-          if (typeof this['on' + type] === 'function') {
-            try { this['on' + type](evt); } catch (err) { console.warn('[TTS Utterance Callback Error]', err); }
-          }
-          this.dispatchEvent(evt);
+          dispatchUtteranceEvent(this, type, extra);
         }
       }
 
-      if (typeof window.SpeechSynthesisUtterance === 'undefined') {
+      try {
         window.SpeechSynthesisUtterance = NexusUtterance;
-      }
+      } catch (_) {}
 
       const synth = {
         paused: false,
@@ -549,6 +557,7 @@
 
         speak(utterance) {
           if (!utterance || !utterance.text) return;
+          activeUtterances.clear();
           const id = utterance.id || ('utt_' + (++utteranceCounter));
           utterance.id = id;
           activeUtterances.set(id, utterance);
@@ -605,23 +614,23 @@
             if (eventType === 'start') {
               synth.speaking = true;
               synth.paused = false;
-              utt._dispatch('start', extra);
+              dispatchUtteranceEvent(utt, 'start', extra);
             } else if (eventType === 'end') {
               synth.speaking = false;
               synth.paused = false;
-              utt._dispatch('end', extra);
+              dispatchUtteranceEvent(utt, 'end', extra);
               activeUtterances.delete(id);
             } else if (eventType === 'error') {
               synth.speaking = false;
               synth.paused = false;
-              utt._dispatch('error', extra);
+              dispatchUtteranceEvent(utt, 'error', extra);
               activeUtterances.delete(id);
             } else if (eventType === 'pause') {
               synth.paused = true;
-              utt._dispatch('pause', extra);
+              dispatchUtteranceEvent(utt, 'pause', extra);
             } else if (eventType === 'resume') {
               synth.paused = false;
-              utt._dispatch('resume', extra);
+              dispatchUtteranceEvent(utt, 'resume', extra);
             }
           }
         } else if (event.data.type === 'NEXUS_TTS_VOICES_LOADED') {
@@ -854,10 +863,28 @@
         utt.lang = lang;
         utt.rate = rate;
         window.speechSynthesis.speak(utt);
+        return utt;
       },
 
       cancelSpeech() {
         window.speechSynthesis.cancel();
+      },
+
+      audio: {
+        play(textOrUrl, options = {}) {
+          if (!textOrUrl) return;
+          if (typeof textOrUrl === 'string' && (textOrUrl.startsWith('http://') || textOrUrl.startsWith('https://') || textOrUrl.startsWith('data:audio') || textOrUrl.startsWith('blob:'))) {
+            const audio = new Audio(textOrUrl);
+            if (options.volume !== undefined) audio.volume = options.volume;
+            if (options.rate !== undefined) audio.playbackRate = options.rate;
+            audio.play().catch(e => console.warn('[Audio Play Error]', e));
+            return audio;
+          }
+          return NexusApp.speak(textOrUrl, options.lang || 'zh-CN', options.rate || 0.85);
+        },
+        stop() {
+          NexusApp.cancelSpeech();
+        }
       },
 
       fetch(url, options) {
@@ -1038,6 +1065,12 @@
         return;
       }
       currentRenderedCode = rawCode;
+
+      try {
+        if (window.speechSynthesis && typeof window.speechSynthesis.cancel === 'function') {
+          window.speechSynthesis.cancel();
+        }
+      } catch (_) {}
 
       const container = document.getElementById('sandbox-root');
       container.innerHTML = rawCode;
