@@ -3556,6 +3556,11 @@ export class NexusChatUI {
         if (!rawQuestion.trim()) return;
         this._handleQuestionRecheck(rawQuestion.trim(), questionContent, true, extraOptions);
     }
+    _hideContextMenu() {
+        if (typeof NexusMenu !== 'undefined' && typeof NexusMenu.close === 'function') {
+            NexusMenu.close();
+        }
+    }
     enterQuestionEditMode(questionDiv) {
         if (!questionDiv || questionDiv.classList.contains('is-editing')) return;
         this._hideContextMenu();
