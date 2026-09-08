@@ -226,8 +226,8 @@ export const NexusViewManager = {
     }
 };
 
-export function updateNotesUrl(noteId, colId) {
-    NexusViewManager.updateUrl('notes', { noteId, colId });
+export function updateNotesUrl(noteId, colId, replaceState = true) {
+    NexusViewManager.updateUrl('notes', { noteId, colId, replaceState });
 }
 
 export function notesOpenPage(noteIdToLoad, colIdToLoad) {

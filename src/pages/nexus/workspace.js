@@ -2239,7 +2239,7 @@ async function init() {
     document.querySelectorAll('.nexus-overlay-backdrop').forEach(el => el.remove());
     document.body.style.overflow = '';
     document.documentElement.style.overflow = '';
-    document.querySelectorAll('.nexus-chat-scroll-content').forEach(el => {
+    document.querySelectorAll('.nexus-chat-scroll-content, .notes-editor-pane').forEach(el => {
         if (el.style.overflow === 'hidden') {
             el.style.overflow = '';
         }
@@ -2252,7 +2252,7 @@ async function init() {
         }
     });
     const mutationObserver = new MutationObserver(() => {
-        document.querySelectorAll('.nexus-chat-scroll-content').forEach(el => {
+        document.querySelectorAll('.nexus-chat-scroll-content, .notes-editor-pane').forEach(el => {
             if (!el.__observedForScrollbar) {
                 el.__observedForScrollbar = true;
                 observer.observe(el);
@@ -2262,7 +2262,7 @@ async function init() {
         });
     });
     mutationObserver.observe(document.body, { childList: true, subtree: true });
-    document.querySelectorAll('.nexus-chat-scroll-content').forEach(el => {
+    document.querySelectorAll('.nexus-chat-scroll-content, .notes-editor-pane').forEach(el => {
         if (!el.__observedForScrollbar) {
             el.__observedForScrollbar = true;
             observer.observe(el);
@@ -2967,7 +2967,7 @@ function initSidebar() {
                     },
                     { divider: true },
                     {
-                        label: 'Sync now',
+                        label: 'Sync now (Ctrl+S)',
                         icon: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>`,
                         action: () => {
                             if (typeof NexusSync !== 'undefined') {
@@ -5526,6 +5526,7 @@ function updateSidebarUserProfile(isAuthenticated, user) {
     const lastSyncEl = document.getElementById('user-last-sync');
     const profileEl = document.querySelector('.user-profile');
     const loginBtn = document.getElementById('sidebar-login-btn');
+    const wrapper = document.getElementById('user-avatar-wrapper');
 
     if (isAuthenticated && user) {
         try {
@@ -5544,6 +5545,15 @@ function updateSidebarUserProfile(isAuthenticated, user) {
                 const initials = (user.name || "U").split(" ").map(n => n[0]).join("").substring(0, 2).toUpperCase();
                 avatarEl.textContent = initials;
             }
+        }
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local && wrapper) {
+            chrome.storage.local.get(['nexus_has_unsynced'], (res) => {
+                if (res && res.nexus_has_unsynced) {
+                    wrapper.classList.add('has-unsynced');
+                } else {
+                    wrapper.classList.remove('has-unsynced');
+                }
+            });
         }
     } else {
         try {
@@ -5784,10 +5794,24 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
                 }
             }
         }
+        if (request.action === 'nexus_unsynced_status') {
+            const wrapper = document.getElementById('user-avatar-wrapper');
+            if (wrapper) {
+                wrapper.classList.toggle('has-unsynced', !!request.hasUnsynced);
+            }
+        }
     });
 }
 
-// Auto-pull when returning to tab after being away for >= 5 minutes
+window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        if (typeof NexusSync !== 'undefined' && typeof NexusAuth !== 'undefined' && NexusAuth.isAuthenticated) {
+            NexusSync.syncUp().catch(err => console.error('Sync failed:', err));
+        }
+    }
+});
+
 let lastTabActiveTime = Date.now();
 const IDLE_SYNC_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 

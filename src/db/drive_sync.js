@@ -78,6 +78,7 @@ export class SyncManager {
                     } else {
                         setTimeout(() => {
                             if (wrapper) wrapper.classList.remove('is-syncing');
+                            this.clearUnsynced();
                             this.notifyListeners('Synced just now', Date.now());
                         }, 500);
                     }
@@ -96,6 +97,16 @@ export class SyncManager {
         this.FILENAME = 'nexus_backup.json';
         this.listeners = [];
         this.isSyncing = false;
+        this.hasUnsyncedChanges = false;
+
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.get(['nexus_has_unsynced'], (res) => {
+                if (res && res.nexus_has_unsynced) {
+                    this.hasUnsyncedChanges = true;
+                    this._updateUnsyncedUI(true);
+                }
+            });
+        }
 
         const isBackground = typeof window === 'undefined';
         if (isBackground && typeof chrome !== 'undefined') {
@@ -121,7 +132,8 @@ export class SyncManager {
                     'drive_uploaded_blobs', 'drive_backup_file_id',
                     'settings_last_updated', 'optionsLastSection', 'optionsLastScroll', 'optionsScrollPositions',
                     'sidepanel_active_tab_index', 'sidepanel_active_group_index',
-                    'nexus_active_tab_index', 'nexus_active_group_index'
+                    'nexus_active_tab_index', 'nexus_active_group_index',
+                    'nexus_has_unsynced'
                 ];
                 const hasSettingsKeys = keys.some(k =>
                     !k.startsWith('nexus_session_') &&
@@ -130,24 +142,46 @@ export class SyncManager {
                 );
                 if (hasSettingsKeys) {
                     chrome.storage.local.set({ settings_last_updated: Date.now() });
+                    this.markUnsynced();
                 }
             });
         }
     }
 
+    markUnsynced() {
+        this.hasUnsyncedChanges = true;
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.set({ nexus_has_unsynced: true }).catch(() => {});
+        }
+        this._updateUnsyncedUI(true);
+        try {
+            chrome.runtime.sendMessage({ action: 'nexus_unsynced_status', hasUnsynced: true }).catch(() => {});
+        } catch (e) {}
+    }
+
+    clearUnsynced() {
+        this.hasUnsyncedChanges = false;
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.set({ nexus_has_unsynced: false }).catch(() => {});
+        }
+        this._updateUnsyncedUI(false);
+        try {
+            chrome.runtime.sendMessage({ action: 'nexus_unsynced_status', hasUnsynced: false }).catch(() => {});
+        } catch (e) {}
+    }
+
+    _updateUnsyncedUI(hasUnsynced) {
+        if (typeof document !== 'undefined') {
+            const wrapper = document.getElementById('user-avatar-wrapper');
+            if (wrapper) {
+                wrapper.classList.toggle('has-unsynced', !!hasUnsynced);
+            }
+        }
+    }
+
     triggerDebouncedSync(delayMs = 1000) {
         if (!this.authService.isAuthenticated) return;
-        if (this._isPageContext()) {
-            try {
-                chrome.runtime.sendMessage({ action: 'nexus_drive_sync_debounced', delayMs }).catch(() => {});
-            } catch (e) {}
-            return;
-        }
-        if (this._debounceTimer) clearTimeout(this._debounceTimer);
-        this._debounceTimer = setTimeout(() => {
-            this._debounceTimer = null;
-            this.pushToCloud().catch(err => console.error('[Sync] Debounced push failed:', err));
-        }, delayMs);
+        this.markUnsynced();
     }
 
     addListener(callback) {
@@ -717,6 +751,7 @@ export class SyncManager {
                 chrome.runtime.sendMessage({ action: 'nexus_sync_status', status: 'done', timestamp: now }).catch(() => {});
             } catch (e) {}
 
+            this.clearUnsynced();
             this.notifyListeners('Synced just now', now);
             return now;
         } catch (error) {
@@ -854,6 +889,7 @@ export class SyncManager {
 
             if (typeof globalThis !== 'undefined') globalThis._lastDriveSyncAt = now;
 
+            this.clearUnsynced();
             this.notifyListeners('Synced just now', now);
             try { chrome.runtime.sendMessage({ action: 'nexus_sync_status', status: 'done', timestamp: now }).catch(() => {}); } catch (e) {}
             return now;

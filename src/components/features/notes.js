@@ -1,6 +1,6 @@
 import { NotesManager } from '../../db/notes_manager.js';
 import { NexusMenu } from '../ui/index.js';
-import { Editor } from '@tiptap/core';
+import { Editor, Extension, markInputRule, wrappingInputRule } from '@tiptap/core';
 import { StarterKit } from '@tiptap/starter-kit';
 import { Placeholder } from '@tiptap/extension-placeholder';
 import { TaskList } from '@tiptap/extension-task-list';
@@ -9,9 +9,293 @@ import { Table } from '@tiptap/extension-table';
 import { TableRow } from '@tiptap/extension-table-row';
 import { TableHeader } from '@tiptap/extension-table-header';
 import { TableCell } from '@tiptap/extension-table-cell';
-import { Link } from '@tiptap/extension-link';
 import { Highlight } from '@tiptap/extension-highlight';
+import { Link } from '@tiptap/extension-link';
 import { Underline } from '@tiptap/extension-underline';
+import { Plugin, PluginKey } from '@tiptap/pm/state';
+import { DOMParser } from '@tiptap/pm/model';
+import markdownit from 'markdown-it';
+import taskLists from 'markdown-it-task-lists';
+
+const mdEngine = markdownit({
+    html: true,
+    linkify: true,
+    breaks: false,
+    typographer: true
+}).use(taskLists, { enabled: true, label: true, labelAfter: false });
+
+function highlightPlugin(mdInstance) {
+    function tokenize(state, silent) {
+        if (state.src.charCodeAt(state.pos) !== 0x3D || state.src.charCodeAt(state.pos + 1) !== 0x3D) {
+            return false;
+        }
+        const start = state.pos;
+        const max = state.posMax;
+        if (silent) return false;
+
+        let end = -1;
+        for (let i = start + 2; i < max - 1; i++) {
+            if (state.src.charCodeAt(i) === 0x3D && state.src.charCodeAt(i + 1) === 0x3D) {
+                end = i;
+                break;
+            }
+        }
+        if (end === -1) return false;
+
+        const content = state.src.slice(start + 2, end);
+        if (!content || content.includes('\n')) return false;
+
+        state.pos = end + 2;
+        const tokenOpen = state.push('mark_open', 'mark', 1);
+        tokenOpen.attrs = [['class', 'nexus-highlight']];
+        const tokenText = state.push('text', '', 0);
+        tokenText.content = content;
+        state.push('mark_close', 'mark', -1);
+        return true;
+    }
+    mdInstance.inline.ruler.before('emphasis', 'mark', tokenize);
+}
+
+mdEngine.use(highlightPlugin);
+
+export function isMarkdownText(text) {
+    if (!text || typeof text !== 'string') return false;
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+
+    if (/^#{1,6}\s+\S+/m.test(trimmed)) return true;
+    if (/^\s*[-*+]?\s*\[[ xX]\]\s+/m.test(trimmed)) return true;
+    if (/^```|^~~~/m.test(trimmed)) return true;
+    if (/^>\s+\S+/m.test(trimmed)) return true;
+    if (/\|.+\|[\r\n]+\|[-:\s|]+\|/m.test(trimmed)) return true;
+    if (/^(?:---|---|\*\*\*|___)\s*$/m.test(trimmed)) return true;
+    if (/(?:^|\n)\s*[-*+]\s+.+\n\s*[-*+]\s+/m.test(trimmed)) return true;
+    if (/(?:^|\n)\s*\d+\.\s+.+\n\s*\d+\.\s+/m.test(trimmed)) return true;
+    if (/\*\*[^*\n]+\*\*|~~[^~\n]+~~|==[^=\n]+==|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)/.test(trimmed)) return true;
+
+    return false;
+}
+
+export function markdownToTipTapHtml(markdown) {
+    if (!markdown || typeof markdown !== 'string') return '';
+    let html = mdEngine.render(markdown);
+
+    html = html.replace(/<ul class="contains-task-list">/g, '<ul data-type="taskList">');
+    html = html.replace(/<li class="[^"]*task-list-item[^"]*">([\s\S]*?)<\/li>/g, (match, inner) => {
+        const isChecked = /type="checkbox"\s+checked/.test(inner) || /checked=""/.test(inner) || /checked\b/.test(inner);
+        const textOnly = inner
+            .replace(/<input[^>]*>/gi, '')
+            .replace(/<\/?label[^>]*>/gi, '')
+            .trim();
+        return `<li data-type="taskItem" data-checked="${isChecked}"><p>${textOnly}</p></li>`;
+    });
+
+    return html;
+}
+
+export function docToMarkdown(node) {
+    if (!node) return '';
+    if (typeof node === 'string') {
+        try {
+            node = JSON.parse(node);
+        } catch {
+            return node;
+        }
+    }
+
+    if (Array.isArray(node)) {
+        return node.map(docToMarkdown).join('\n\n');
+    }
+
+    const type = node.type;
+    const content = node.content ? node.content.map(docToMarkdown).join('') : '';
+
+    switch (type) {
+        case 'doc':
+            return node.content ? node.content.map(docToMarkdown).join('\n\n') : '';
+        case 'paragraph':
+            return content;
+        case 'heading': {
+            const level = node.attrs?.level || 1;
+            return '#'.repeat(level) + ' ' + content;
+        }
+        case 'blockquote':
+            return content.split('\n').map(line => `> ${line}`).join('\n');
+        case 'codeBlock': {
+            const lang = node.attrs?.language || '';
+            return '```' + lang + '\n' + content + '\n```';
+        }
+        case 'bulletList':
+            return node.content ? node.content.map(docToMarkdown).join('\n') : '';
+        case 'orderedList':
+            return node.content ? node.content.map((item, i) => {
+                const itemContent = docToMarkdown(item).replace(/^\s*[-*]\s+/, '');
+                return `${i + 1}. ${itemContent}`;
+            }).join('\n') : '';
+        case 'listItem':
+            return `- ${content.trim()}`;
+        case 'taskList':
+            return node.content ? node.content.map(docToMarkdown).join('\n') : '';
+        case 'taskItem': {
+            const checked = node.attrs?.checked ? '[x]' : '[ ]';
+            return `- ${checked} ${content.trim()}`;
+        }
+        case 'horizontalRule':
+            return '---';
+        case 'table': {
+            if (!node.content) return '';
+            const rows = node.content.map(r => {
+                const cells = (r.content || []).map(c => docToMarkdown(c).trim().replace(/\n/g, ' '));
+                return `| ${cells.join(' | ')} |`;
+            });
+            if (rows.length > 0 && node.content[0]?.content) {
+                const headerCount = node.content[0].content.length;
+                const separator = `| ${Array(headerCount).fill('---').join(' | ')} |`;
+                rows.splice(1, 0, separator);
+            }
+            return rows.join('\n');
+        }
+        case 'tableRow':
+        case 'tableHeader':
+        case 'tableCell':
+            return content;
+        case 'text': {
+            let text = node.text || '';
+            if (node.marks && Array.isArray(node.marks)) {
+                for (const mark of node.marks) {
+                    if (mark.type === 'bold') text = `**${text}**`;
+                    else if (mark.type === 'italic') text = `*${text}*`;
+                    else if (mark.type === 'strike') text = `~~${text}~~`;
+                    else if (mark.type === 'code') text = `\`${text}\``;
+                    else if (mark.type === 'highlight') text = `==${text}==`;
+                    else if (mark.type === 'link') text = `[${text}](${mark.attrs?.href || ''})`;
+                }
+            }
+            return text;
+        }
+        default:
+            return content;
+    }
+}
+
+export const NoteMarkdownSupport = Extension.create({
+    name: 'noteMarkdownSupport',
+
+    addInputRules() {
+        const rules = [];
+
+        if (this.editor.schema.marks.highlight) {
+            rules.push(
+                markInputRule({
+                    find: /(?:^|\s)(==(?!\s+==)([^=\s]+(?:\s+[^=\s]+)*)==)$/,
+                    type: this.editor.schema.marks.highlight
+                })
+            );
+        }
+
+        if (this.editor.schema.marks.link) {
+            rules.push(
+                markInputRule({
+                    find: /(?:^|\s)\[([^\]]+)\]\(([^)]+)\)$/,
+                    type: this.editor.schema.marks.link,
+                    getAttributes: match => ({ href: match[2] })
+                })
+            );
+        }
+
+        if (this.editor.schema.nodes.taskItem) {
+            rules.push(
+                wrappingInputRule({
+                    find: /^\s*([-*]?\s*\[([ |x])\])\s$/,
+                    type: this.editor.schema.nodes.taskItem,
+                    getAttributes: match => ({ checked: match[2] === 'x' || match[2] === 'X' })
+                })
+            );
+        }
+
+        return rules;
+    },
+
+    addProseMirrorPlugins() {
+        return [
+            new Plugin({
+                key: new PluginKey('nexusMarkdownPaste'),
+                props: {
+                    handlePaste(view, event) {
+                        const text = event.clipboardData?.getData('text/plain');
+                        if (!text || typeof text !== 'string') return false;
+
+                        const html = event.clipboardData?.getData('text/html');
+                        const isMd = isMarkdownText(text);
+
+                        if (!html || isMd) {
+                            const parsedHtml = markdownToTipTapHtml(text);
+                            if (!parsedHtml) return false;
+
+                            const container = document.createElement('div');
+                            container.innerHTML = parsedHtml;
+
+                            const slice = DOMParser.fromSchema(view.state.schema).parseSlice(container, {
+                                preserveWhitespace: true,
+                                context: view.state.selection.$from
+                            });
+
+                            const tr = view.state.tr.replaceSelection(slice);
+                            view.dispatch(tr.scrollIntoView());
+                            return true;
+                        }
+                        return false;
+                    }
+                }
+            })
+        ];
+    }
+});
+
+const handleHeading = (editor, level) => editor.chain().focus().toggleHeading({ level }).run();
+const handleResetFormat = (editor) => editor.chain().focus().clearNodes().setParagraph().unsetAllMarks().run();
+
+export const NoteKeyboardShortcuts = Extension.create({
+    name: 'noteKeyboardShortcuts',
+    addKeyboardShortcuts() {
+        return {
+            'Mod-Shift-1': () => handleHeading(this.editor, 1),
+            'Mod-Shift-!': () => handleHeading(this.editor, 1),
+            'Mod-!': () => handleHeading(this.editor, 1),
+            'Mod-Shift-2': () => handleHeading(this.editor, 2),
+            'Mod-Shift-@': () => handleHeading(this.editor, 2),
+            'Mod-@': () => handleHeading(this.editor, 2),
+            'Mod-Shift-3': () => handleHeading(this.editor, 3),
+            'Mod-Shift-#': () => handleHeading(this.editor, 3),
+            'Mod-#': () => handleHeading(this.editor, 3),
+            'Mod-Shift-4': () => handleHeading(this.editor, 4),
+            'Mod-Shift-$': () => handleHeading(this.editor, 4),
+            'Mod-$': () => handleHeading(this.editor, 4),
+            'Mod-Shift-5': () => handleHeading(this.editor, 5),
+            'Mod-Shift-%': () => handleHeading(this.editor, 5),
+            'Mod-%': () => handleHeading(this.editor, 5),
+            'Mod-Shift-6': () => handleHeading(this.editor, 6),
+            'Mod-Shift-^': () => handleHeading(this.editor, 6),
+            'Mod-^': () => handleHeading(this.editor, 6),
+            'Mod-\\': () => handleResetFormat(this.editor),
+            'Mod-Shift-0': () => handleResetFormat(this.editor),
+            'Mod-Shift-)': () => handleResetFormat(this.editor),
+            'Mod-)': () => handleResetFormat(this.editor),
+            'Mod-s': () => {
+                if (typeof window !== 'undefined' && window.NexusSync) {
+                    window.NexusSync.syncUp().catch(() => {});
+                }
+                return true;
+            },
+            'Mod-S': () => {
+                if (typeof window !== 'undefined' && window.NexusSync) {
+                    window.NexusSync.syncUp().catch(() => {});
+                }
+                return true;
+            }
+        };
+    }
+});
 
 // ============================================================================
 // 1. NOTES UTILITIES
@@ -255,16 +539,10 @@ export function getDocPositionFromPoint(view, clientX, clientY) {
         return findVisualLineEnd(view, doc, startPos);
     }
 
-    // ── CASE 2: Click is BELOW all text (e.g. empty space / bottom padding) ──
     if (clientY > bottomTextY) {
-        if (!isLeft) {
-            return endPos;
-        }
-        // Left margin below text: start of the LAST visual line
-        return findVisualLineStart(view, doc, endPos);
+        return endPos;
     }
 
-    // ── CASE 3: Click is alongside text (left or right margin) ───────────────
     const centerX = (pmRect.left + pmRect.right) / 2;
     let probeResult = null;
 
@@ -298,13 +576,6 @@ export function getDocPositionFromPoint(view, clientX, clientY) {
     }
 }
 
-// ============================================================================
-// 3. TIPTAP EDITOR WRAPPER
-// ============================================================================
-
-/**
- * Normalizes note content into standard TipTap doc JSON or text
- */
 function normalizeContent(data) {
     if (!data) {
         return { type: 'doc', content: [{ type: 'paragraph' }] };
@@ -312,10 +583,13 @@ function normalizeContent(data) {
 
     if (typeof data === 'string') {
         try {
-            data = JSON.parse(data);
-        } catch {
-            return data;
-        }
+            const parsed = JSON.parse(data);
+            if (parsed && parsed.type === 'doc') {
+                return parsed;
+            }
+        } catch {}
+
+        return markdownToTipTapHtml(data);
     }
 
     if (data && data.type === 'doc') {
@@ -376,16 +650,18 @@ export class NexusTipTapEditor {
                 TableRow,
                 TableHeader,
                 TableCell,
+                Highlight.configure({
+                    multicolor: true
+                }),
                 Link.configure({
                     openOnClick: false,
                     HTMLAttributes: {
                         class: 'nexus-editor-link'
                     }
                 }),
-                Highlight.configure({
-                    multicolor: true
-                }),
-                Underline
+                Underline,
+                NoteMarkdownSupport,
+                NoteKeyboardShortcuts
             ],
             content: this.initialContent,
             editorProps: {
@@ -525,10 +801,34 @@ export class NotesPanel {
     }
 
     showHubView() {
+        if (this.autoSaveTimer) {
+            clearTimeout(this.autoSaveTimer);
+            this.autoSaveTimer = null;
+            if (this.activeNoteId && this.editorInstance) {
+                const outputData = this.editorInstance.getJSON();
+                const title = this.noteTitleInput ? this.noteTitleInput.value.trim() : '';
+                NotesManager.saveNote(this.activeNoteId, {
+                    title: title || 'Untitled Note',
+                    content: outputData
+                }).catch(() => {});
+            }
+        }
         if (this.activeNoteId) {
             this.checkAndDiscardEmptyNote(this.activeNoteId);
         }
         this.activeNoteId = null;
+        if (this.editorInstance && typeof this.editorInstance.unmount === 'function') {
+            try {
+                this.editorInstance.unmount();
+            } catch (e) {}
+            this.editorInstance = null;
+        }
+        if (this.editorContainer) {
+            this.editorContainer.innerHTML = '';
+        }
+        if (this.noteTitleInput) {
+            this.noteTitleInput.value = '';
+        }
         if (this.container) {
             this.container.classList.remove('is-detail');
         }
@@ -554,6 +854,9 @@ export class NotesPanel {
         }
         if (this.detailView) {
             this.detailView.style.display = 'flex';
+        }
+        if (this.editorPane) {
+            this.editorPane.scrollTop = 0;
         }
         this.updateUrlParams();
     }
@@ -788,16 +1091,15 @@ export class NotesPanel {
 
                 if (!this.editorInstance?.editor) return;
 
-                // ── 2. Editor Body Margin Handling ──────────────────────────────────
+                // ── 2. Editor Body Margin & Spacer Handling ─────────────────────────
                 if (pmRect) {
                     const inPmHorizontalBounds = e.clientX >= pmRect.left && e.clientX <= pmRect.right;
-                    if (inPmHorizontalBounds) {
-                        // Native browser text hit-testing handles this - do nothing
+                    const isInsideTextRegion = inPmHorizontalBounds && e.clientY >= pmRect.top && e.clientY <= pmRect.bottom;
+                    if (isInsideTextRegion) {
                         return;
                     }
                 }
 
-                // Click is in the left or right margin outside ProseMirror column
                 e.preventDefault();
 
                 const pos = this.editorInstance.getDocPositionFromPoint(e.clientX, e.clientY);
@@ -1374,8 +1676,6 @@ export class NotesPanel {
     async handleCreateNote() {
         const colId = (this.activeCollectionId === 'all' || this.activeCollectionId === 'col_default') ? null : this.activeCollectionId;
         const newNote = await NotesManager.createNote(colId, '');
-        this.activeNoteId = newNote.id;
-        await this.showDetailView(newNote.id);
         await this.loadNote(newNote.id);
         if (this.noteTitleInput) {
             this.noteTitleInput.value = '';
@@ -1384,13 +1684,24 @@ export class NotesPanel {
     }
 
     async loadNote(noteId) {
+        if (this.autoSaveTimer) {
+            clearTimeout(this.autoSaveTimer);
+            this.autoSaveTimer = null;
+            if (this.activeNoteId && this.activeNoteId !== noteId && this.editorInstance) {
+                const outputData = this.editorInstance.getJSON();
+                const title = this.noteTitleInput ? this.noteTitleInput.value.trim() : '';
+                await NotesManager.saveNote(this.activeNoteId, {
+                    title: title || 'Untitled Note',
+                    content: outputData
+                }).catch(() => {});
+            }
+        }
         this.activeNoteId = noteId;
         const note = await NotesManager.getNote(noteId);
         if (!note) {
             this.showHubView();
             return;
         }
-        await this.showDetailView(noteId);
         if (this.noteTitleInput) {
             this.noteTitleInput.value = note.title || '';
         }
@@ -1398,6 +1709,15 @@ export class NotesPanel {
         await this.updateCollectionPickerPill(note);
         await this.updatePinDetailBtn(note);
         await this.initEditorInstance(note.content);
+        await this.showDetailView(noteId);
+        if (this.editorPane) {
+            this.editorPane.scrollTop = 0;
+            requestAnimationFrame(() => {
+                if (this.editorPane) {
+                    this.editorPane.scrollTop = 0;
+                }
+            });
+        }
     }
 
     async updatePinDetailBtn(note) {
@@ -1598,7 +1918,7 @@ export class NotesPanel {
                             label: 'Export Markdown',
                             icon: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
                             action: () => {
-                                const mdText = `# ${note.title || 'Untitled'}\n\n${extractNoteText(note.content)}`;
+                                const mdText = `# ${note.title || 'Untitled'}\n\n${docToMarkdown(note.content)}`;
                                 const blob = new Blob([mdText], { type: 'text/markdown' });
                                 const url = URL.createObjectURL(blob);
                                 const a = document.createElement('a');
