@@ -3,6 +3,7 @@ import { WidgetRunner } from '../widgets/widget_runner.js';
 import { NexusMenu, NexusChatInput, NexusModal } from '../ui/index.js';
 import { NexusModelHelper } from '../cores/model_helper.js';
 import { NexusChatUI } from '../cores/chat_ui.js';
+import { streamSafeParse } from '../cores/markdown_parser.js';
 import { NexusCodeEditor } from '../ui/nexus_code_editor.js';
 import { NexusAppsDB, NexusAppsCheckpointDB } from '../../db/apps_db.js';
 
@@ -1088,18 +1089,7 @@ export class AppsPanel {
 
         if (!raw) return '';
 
-        let parsedMain = '';
-        if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
-            parsedMain = marked.parse(raw);
-        } else {
-            let str = this.escapeHtml(raw);
-            str = str.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            str = str.replace(/\*(.*?)\*/g, '<em>$1</em>');
-            str = str.replace(/`([^`]+)`/g, '<code>$1</code>');
-            str = str.replace(/\n/g, '<br>');
-            parsedMain = str;
-        }
-
+        const parsedMain = streamSafeParse(raw);
         return parsedMain ? `<div class="apps-main-response">${parsedMain}</div>` : '';
     }
 

@@ -193,8 +193,24 @@ export const ChatHistoryManager = {
             const existingSession = await NexusChatDB.getSession(activeSessionId) || {};
             const existingMessages = await NexusChatDB.getMessages(activeSessionId).catch(() => []);
             const isRenamed = existingSession.isRenamed || false;
-            const autoNamed = existingSession.autoNamed || false;
-            const finalTitle = (isRenamed || autoNamed) ? existingSession.title : title;
+            let autoNamed = existingSession.autoNamed || false;
+
+            const globalStore = (typeof window !== 'undefined') ? window : ((typeof globalThis !== 'undefined') ? globalThis : null);
+            let pendingAutoTitle = (globalStore && globalStore._pendingAutoTitles) ? globalStore._pendingAutoTitles[activeSessionId] : null;
+            if (!pendingAutoTitle && typeof tabs !== 'undefined' && Array.isArray(tabs)) {
+                const matchingTab = tabs.find(t => t && t.sessionId === activeSessionId && t.autoNamed && t.title);
+                if (matchingTab) pendingAutoTitle = matchingTab.title;
+            }
+
+            let finalTitle = title;
+            if (isRenamed) {
+                finalTitle = existingSession.title;
+            } else if (autoNamed) {
+                finalTitle = existingSession.title;
+            } else if (pendingAutoTitle) {
+                finalTitle = pendingAutoTitle;
+                autoNamed = true;
+            }
 
             if (!force && existingSession.id && existingMessages.length === optimizedMessages.length && JSON.stringify(existingMessages) === JSON.stringify(optimizedMessages) && existingSession.title === finalTitle) {
                 return;
@@ -229,7 +245,7 @@ export const ChatHistoryManager = {
                 id: activeSessionId,
                 title: finalTitle,
                 isRenamed: isRenamed,
-                autoNamed: existingSession.autoNamed || false,
+                autoNamed: autoNamed,
                 sparkId: sparkId || existingSession.sparkId || null,
                 searchIndex: fullSearchText,
                 questions: questions,

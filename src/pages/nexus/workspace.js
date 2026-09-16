@@ -5871,32 +5871,43 @@ function startConcurrentAutoNaming(sessionId, modelObj, questionText, images, hi
         if (response && response.success && response.title) {
             const cleanTitle = response.title.trim();
             console.log('[AutoNaming] Generated title successfully:', cleanTitle);
+            if (typeof window !== 'undefined') {
+                window._pendingAutoTitles = window._pendingAutoTitles || {};
+                window._pendingAutoTitles[sessionId] = cleanTitle;
+            }
             if (typeof tabs !== 'undefined') {
                 tabs.forEach(t => {
-                    if (t.sessionId === sessionId) t.title = cleanTitle;
+                    if (t.sessionId === sessionId) {
+                        t.title = cleanTitle;
+                        t.autoNamed = true;
+                    }
                 });
                 if (typeof renderTabs === 'function') renderTabs();
+                if (typeof renderSidebarTabs === 'function') renderSidebarTabs();
             }
             const tryWriteTitle = async (attemptsLeft) => {
                 const session = await NexusChatDB.getSession(sessionId);
                 console.log('[AutoNaming] tryWriteTitle check:', { sessionId, sessionExists: !!session, attemptsLeft });
                 if (session) {
-                    session.title = cleanTitle;
-                    session.autoNamed = true;
-                    await NexusChatDB.putSession(session);
-                    console.log('[AutoNaming] Successfully wrote title to DB for:', sessionId);
-                    chrome.runtime.sendMessage({ action: 'nexus_sessions_index_updated' }).catch(() => {});
-                    if (typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
-                        NexusSync.triggerDebouncedSync();
+                    if (!session.isRenamed) {
+                        session.title = cleanTitle;
+                        session.autoNamed = true;
+                        await NexusChatDB.putSession(session);
+                        console.log('[AutoNaming] Successfully wrote title to DB for:', sessionId);
+                        chrome.runtime.sendMessage({ action: 'nexus_sessions_index_updated' }).catch(() => {});
+                        if (typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
+                            NexusSync.triggerDebouncedSync();
+                        }
                     }
+                    if (typeof renderRecentChatsSidebar === 'function') renderRecentChatsSidebar();
                 } else if (attemptsLeft > 0) {
                     setTimeout(() => tryWriteTitle(attemptsLeft - 1), 400);
                 } else {
-                    console.warn('[AutoNaming] Failed to write title after all attempts (session not found in DB)');
+                    console.log('[AutoNaming] Session not in DB yet after retries, title cached in pendingAutoTitles for first save');
                     if (typeof renderRecentChatsSidebar === 'function') renderRecentChatsSidebar();
                 }
             };
-            await tryWriteTitle(8);
+            await tryWriteTitle(25);
         } else {
             console.warn('[AutoNaming] Title generation failed:', response?.error);
             if (typeof renderRecentChatsSidebar === 'function') renderRecentChatsSidebar();

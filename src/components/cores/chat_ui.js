@@ -1087,39 +1087,13 @@ export class NexusChatUI {
             this.currentAnswerDiv.appendChild(answerContentDiv);
             answerContentDiv.__isRich = false;
         }
-        if (!answerContentDiv.__isRich) {
-            let fastText = newText.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').trim();
-            if (fastText) {
-                if (typeof marked !== 'undefined') {
-                    const htmlContent = marked.parse(fastText) || '...';
-                    if (answerContentDiv.childNodes.length === 0) {
-                        answerContentDiv.innerHTML = htmlContent;
-                    } else {
-                        if (this.loadingDiv && answerContentDiv.contains(this.loadingDiv)) {
-                            this.loadingDiv.remove();
-                            this.loadingDiv = null;
-                        }
-                        morphDOM(answerContentDiv, htmlContent);
-                        WidgetRunner.hydrateWidgets(answerContentDiv);
-                    }
-                } else {
-                    if (this.loadingDiv && answerContentDiv.contains(this.loadingDiv)) {
-                        this.loadingDiv.remove();
-                        this.loadingDiv = null;
-                    }
-                    if (fastText.length < 1000) {
-                        answerContentDiv.textContent = fastText;
-                    } else {
-                        answerContentDiv.textContent = fastText.substring(0, 1000) + "...";
-                    }
-                }
-            }
-        }
+
+        // Fast 60 FPS streaming render via requestAnimationFrame
         if (!this._renderPending) {
             this._renderPending = true;
             this._pendingRenderSkipScroll = this._pendingRenderSkipScroll || skipScroll;
             const targetDiv = this.currentAnswerDiv;
-            setTimeout(() => {
+            requestAnimationFrame(() => {
                 if (targetDiv) {
                     this._renderPending = false;
                     const shouldSkipScroll = this._pendingRenderSkipScroll;
@@ -1129,8 +1103,7 @@ export class NexusChatUI {
                     this._renderPending = false;
                     this._pendingRenderSkipScroll = false;
                 }
-            }, 80);
-
+            });
         }
     }
     _doRender(answerDiv, skipScroll = false, isFinished = false) {
@@ -1224,7 +1197,7 @@ export class NexusChatUI {
                 content = content.replace(/!\[([^\]]*)\]\((image-search:\/\/[^)]*)\)/g, (match, alt, url) => {
                     return `![${alt}](${url.replace(/ /g, '%20')})`;
                 });
-                let htmlContent = marked.parse(content);
+                let htmlContent = streamSafeParse(content, { isFinal: isFinished });
                 if (this.webSearchSources.length > 0) {
                     htmlContent = htmlContent.replace(/\[(\d+)\]/g, (match, num) => {
                         const sourceIndex = parseInt(num) - 1;
@@ -1258,7 +1231,7 @@ export class NexusChatUI {
         // Auto-follow bottom only if user hasn't scrolled up (i.e. is near bottom) and not scroll-locked
         if (!skipScroll && !this.disableAutoScroll && this._isNearBottom(28) && !this._scrollThrottled && !this._regenScrollLocked) {
             this._scrollThrottled = true;
-            setTimeout(() => { this._scrollThrottled = false; }, 60);
+            requestAnimationFrame(() => { this._scrollThrottled = false; });
             this.scrollToBottom();
         } else if (this._regenScrollLocked && preserveScrollTop !== null && scrollContainer) {
             scrollContainer.scrollTop = preserveScrollTop;
@@ -1280,58 +1253,51 @@ export class NexusChatUI {
         const rawText = answerDivSnapshot ? (answerDivSnapshot.getAttribute('data-raw-text') || '') : '';
         const shouldStickBottom = !this.disableStreamAutoFollow && !skipScroll && this._isNearBottom();
         if (answerDivSnapshot) {
-            this._scheduleLowPriority(async () => {
-                if (!answerDivSnapshot.isConnected) return;
-                const previousSources = this.webSearchSources;
-                this.webSearchSources = sourcesSnapshot;
-                const scrollContainer = this.getScrollContainer();
-                const savedScrollTop = scrollContainer && !shouldStickBottom ? scrollContainer.scrollTop : null;
-                if (scrollContainer && !shouldStickBottom) {
-                    scrollContainer.style.overflowAnchor = 'none';
+            const previousSources = this.webSearchSources;
+            this.webSearchSources = sourcesSnapshot;
+            const scrollContainer = this.getScrollContainer();
+            const savedScrollTop = scrollContainer && !shouldStickBottom ? scrollContainer.scrollTop : null;
+            if (scrollContainer && !shouldStickBottom) {
+                scrollContainer.style.overflowAnchor = 'none';
+            }
+            try {
+                if (rawText.trim()) {
+                    this._doRender(answerDivSnapshot, true, true);
                 }
-                try {
-                    if (rawText.trim()) {
-                        this._doRender(answerDivSnapshot, true, true);
-                    }
-                    if (sourcesSnapshot.length > 0) {
-                        answerDivSnapshot.dataset.webSearch = JSON.stringify({
-                            sourcesCount: sourcesSnapshot.length
-                        });
-                        if (!answerDivSnapshot.querySelector('.nexus-sources')) {
-                            const sourcesDiv = document.createElement('div');
-                            sourcesDiv.className = 'nexus-sources';
-                            sourcesDiv.innerHTML = `
-                                <div class="nexus-sources-title">Sources</div>
-                                <div class="nexus-sources-list">
-                                    ${sourcesSnapshot.map((source, idx) => `
-                                        <a href="${source.link}" target="_blank" rel="noopener noreferrer" class="nexus-source-item">
-                                            <span class="nexus-source-num">${idx + 1}</span>
-                                            <div class="nexus-source-info">
-                                                <div class="nexus-source-name">${source.title || 'Source'}</div>
-                                                <div class="nexus-source-domain">${source.displayLink || new URL(source.link).hostname}</div>
-                                            </div>
-                                        </a>
-                                    `).join('')}
-                                </div>
-                            `;
-                            answerDivSnapshot.appendChild(sourcesDiv);
-                        }
-                    }
-                    await NexusChatUI.processContainer(answerDivSnapshot);
-                } catch (e) {
-                    console.error('[Nexus] post-answer processing error:', e);
-                } finally {
-                    this.webSearchSources = previousSources;
-                    if (scrollContainer && !shouldStickBottom) {
-                        scrollContainer.style.overflowAnchor = '';
-                        if (savedScrollTop !== null) {
-                            scrollContainer.scrollTop = savedScrollTop;
-                        }
-                    } else {
-                        this._snapToBottomIfNeeded(shouldStickBottom);
+                if (sourcesSnapshot.length > 0) {
+                    answerDivSnapshot.dataset.webSearch = JSON.stringify({
+                        sourcesCount: sourcesSnapshot.length
+                    });
+                    if (!answerDivSnapshot.querySelector('.nexus-sources')) {
+                        const sourcesDiv = document.createElement('div');
+                        sourcesDiv.className = 'nexus-sources';
+                        sourcesDiv.innerHTML = `
+                            <div class="nexus-sources-title">Sources</div>
+                            <div class="nexus-sources-list">
+                                ${sourcesSnapshot.map((source, idx) => `
+                                    <a href="${source.link}" target="_blank" rel="noopener noreferrer" class="nexus-source-item">
+                                        <span class="nexus-source-num">${idx + 1}</span>
+                                        <div class="nexus-source-info">
+                                            <div class="nexus-source-name">${source.title || 'Source'}</div>
+                                            <div class="nexus-source-domain">${source.displayLink || new URL(source.link).hostname}</div>
+                                        </div>
+                                    </a>
+                                `).join('')}
+                            </div>
+                        `;
+                        answerDivSnapshot.appendChild(sourcesDiv);
                     }
                 }
-            }, 380);
+                NexusChatUI.processContainer(answerDivSnapshot);
+            } catch (err) {
+                console.error('[Nexus] Error in finishAnswer render:', err);
+            } finally {
+                this.webSearchSources = previousSources;
+                if (scrollContainer && !shouldStickBottom && savedScrollTop !== null) {
+                    scrollContainer.scrollTop = savedScrollTop;
+                    scrollContainer.style.overflowAnchor = '';
+                }
+            }
         } else if (sourcesSnapshot.length > 0 && !skipScroll && !this.disableStreamAutoFollow) {
             requestAnimationFrame(() => this.scrollToBottom());
         }

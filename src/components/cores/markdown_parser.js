@@ -1,81 +1,278 @@
+/**
+ * Advanced Stream Normalizer for Incomplete Markdown
+ * 
+ * Accurately tracks syntax context to safely close incomplete tokens at stream boundary:
+ * - Fenced code blocks (``` or ~~~ with arbitrary fence lengths)
+ * - Block Math ($$) and Inline Math ($)
+ * - Inline code (` or ``)
+ * - Inline formatting stacks: ** (bold), * (italic), __ (bold), _ (italic), ~~ (strikethrough)
+ * - Incomplete Markdown links/images [alt](url
+ * - Unclosed XML / Custom LMDX components (<Sequence>, <WritingBlock>, etc.)
+ */
+const KNOWN_STREAMING_XML_TAGS = new Set([
+    'Step',
+    'Sequence',
+    'TimelineEvent',
+    'Timeline',
+    'Elicitation',
+    'ElicitationsGroup',
+    'FollowUp',
+    'GenerateApp',
+    'PatchApp',
+    'GenerateWidget',
+    'PatchWidget',
+    'Carousel',
+    'Option',
+    'WritingBlock',
+    'Aspect',
+    'Comparison',
+    'Metric',
+    'Metrics',
+    'BentoItem',
+    'BentoGrid'
+]);
+
 export function completeIncompleteMarkdown(rawText) {
     if (!rawText || typeof rawText !== 'string') return '';
     let text = rawText;
 
-    const fenceMatches = text.match(/```/g);
-    if (fenceMatches && fenceMatches.length % 2 !== 0) {
-        text += '\n```';
+    // 1. Check Fenced Code Block
+    const lines = text.split('\n');
+    let inFence = false;
+    let fenceChar = '';
+    let fenceLength = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        if (match) {
+            const char = match[1][0];
+            const len = match[1].length;
+            if (!inFence) {
+                inFence = true;
+                fenceChar = char;
+                fenceLength = len;
+            } else if (char === fenceChar && len >= fenceLength) {
+                inFence = false;
+                fenceChar = '';
+                fenceLength = 0;
+            }
+        }
     }
 
-    const blockMathMatches = text.match(/\$\$/g);
-    if (blockMathMatches && blockMathMatches.length % 2 !== 0) {
-        text += '\n$$';
+    if (inFence) {
+        return text + '\n' + fenceChar.repeat(fenceLength);
     }
 
-    const inlineCodeMatches = text.replace(/```[\s\S]*?```/g, '').match(/`/g);
-    if (inlineCodeMatches && inlineCodeMatches.length % 2 !== 0) {
-        text += '`';
+    // 2. Scan for Math, Inline Code, Inline Delimiters, Links, and XML tags
+    let result = text;
+    let i = 0;
+    const len = text.length;
+
+    let inMathBlock = false;
+    let inInlineMath = false;
+    let inInlineCode = false;
+    let inlineCodeFence = '';
+
+    const inlineStack = [];
+    const openXmlTags = [];
+
+    while (i < len) {
+        // Check for Block Math $$
+        if (!inInlineCode && !inInlineMath && text.startsWith('$$', i)) {
+            inMathBlock = !inMathBlock;
+            i += 2;
+            continue;
+        }
+
+        if (inMathBlock) {
+            i++;
+            continue;
+        }
+
+        // Check for Inline Math $
+        if (!inInlineCode && text[i] === '$') {
+            if (i > 0 && text[i - 1] === '\\') {
+                i++;
+                continue;
+            }
+            if (inInlineMath) {
+                inInlineMath = false;
+                i++;
+                continue;
+            } else {
+                const nextChar = text[i + 1];
+                if (nextChar && nextChar !== ' ' && nextChar !== '\n' && !/^\d+(?:[.,]\d+)?\s*$/.test(text.slice(i + 1, i + 10))) {
+                    inInlineMath = true;
+                    i++;
+                    continue;
+                }
+            }
+        }
+
+        if (inInlineMath) {
+            i++;
+            continue;
+        }
+
+        // Check for Inline Code `
+        if (text[i] === '`') {
+            let count = 1;
+            while (i + count < len && text[i + count] === '`') {
+                count++;
+            }
+            const delim = '`'.repeat(count);
+            if (inInlineCode) {
+                if (delim === inlineCodeFence) {
+                    inInlineCode = false;
+                    inlineCodeFence = '';
+                }
+            } else {
+                inInlineCode = true;
+                inlineCodeFence = delim;
+            }
+            i += count;
+            continue;
+        }
+
+        if (inInlineCode) {
+            i++;
+            continue;
+        }
+
+        // Check for XML opening/closing tags
+        if (text[i] === '<') {
+            const closeTagMatch = text.slice(i).match(/^<\/([A-Za-z0-9_-]+)>/);
+            if (closeTagMatch) {
+                const tagName = closeTagMatch[1];
+                const lastIdx = openXmlTags.lastIndexOf(tagName);
+                if (lastIdx !== -1) {
+                    openXmlTags.splice(lastIdx, 1);
+                }
+                i += closeTagMatch[0].length;
+                continue;
+            }
+
+            const openTagMatch = text.slice(i).match(/^<([A-Za-z0-9_-]+)(?:\s+[^>]*)?(\/?)>/);
+            if (openTagMatch) {
+                const tagName = openTagMatch[1];
+                const isSelfClosing = openTagMatch[2] === '/' || openTagMatch[0].endsWith('/>');
+                if (!isSelfClosing && KNOWN_STREAMING_XML_TAGS.has(tagName)) {
+                    openXmlTags.push(tagName);
+                }
+                i += openTagMatch[0].length;
+                continue;
+            }
+        }
+
+        // Check for Strikethrough ~~
+        if (text.startsWith('~~', i)) {
+            if (inlineStack.length > 0 && inlineStack[inlineStack.length - 1] === '~~') {
+                inlineStack.pop();
+            } else {
+                inlineStack.push('~~');
+            }
+            i += 2;
+            continue;
+        }
+
+        // Check for Bold / Italic with *
+        if (text.startsWith('**', i)) {
+            if (inlineStack.length > 0 && inlineStack[inlineStack.length - 1] === '**') {
+                inlineStack.pop();
+            } else {
+                inlineStack.push('**');
+            }
+            i += 2;
+            continue;
+        } else if (text[i] === '*') {
+            const isBullet = (i === 0 || text[i - 1] === '\n') && (text[i + 1] === ' ');
+            if (!isBullet) {
+                if (inlineStack.length > 0 && inlineStack[inlineStack.length - 1] === '*') {
+                    inlineStack.pop();
+                } else {
+                    inlineStack.push('*');
+                }
+            }
+            i++;
+            continue;
+        }
+
+        // Check for Bold / Italic with _
+        if (text.startsWith('__', i)) {
+            if (inlineStack.length > 0 && inlineStack[inlineStack.length - 1] === '__') {
+                inlineStack.pop();
+            } else {
+                inlineStack.push('__');
+            }
+            i += 2;
+            continue;
+        } else if (text[i] === '_') {
+            const prev = i > 0 ? text[i - 1] : ' ';
+            const next = i + 1 < len ? text[i + 1] : ' ';
+            const isIntraWord = /[a-zA-Z0-9]/.test(prev) && /[a-zA-Z0-9]/.test(next);
+            if (!isIntraWord) {
+                if (inlineStack.length > 0 && inlineStack[inlineStack.length - 1] === '_') {
+                    inlineStack.pop();
+                } else {
+                    inlineStack.push('_');
+                }
+            }
+            i++;
+            continue;
+        }
+
+        i++;
     }
 
-    const boldMatches = text.replace(/```[\s\S]*?```/g, '').match(/\*\*/g);
-    if (boldMatches && boldMatches.length % 2 !== 0) {
-        text += '**';
+    // Auto-close dangling states in reverse order
+    let suffix = '';
+
+    if (inMathBlock) {
+        suffix += '\n$$';
+    } else if (inInlineMath) {
+        suffix += '$';
     }
 
-    const strikeMatches = text.replace(/```[\s\S]*?```/g, '').match(/~~/g);
-    if (strikeMatches && strikeMatches.length % 2 !== 0) {
-        text += '~~';
+    if (inInlineCode && inlineCodeFence) {
+        if (result.endsWith(inlineCodeFence)) {
+            result = result.slice(0, -inlineCodeFence.length);
+        } else {
+            suffix += inlineCodeFence;
+        }
     }
 
-    const unclosedLink = text.match(/\[([^\]]*)$/);
-    if (unclosedLink) {
-        text = text.slice(0, unclosedLink.index) + unclosedLink[1];
+    while (inlineStack.length > 0) {
+        const delim = inlineStack.pop();
+        if (result.endsWith(delim)) {
+            result = result.slice(0, -delim.length);
+        } else {
+            suffix += delim;
+        }
+    }
+
+    const unclosedHref = result.match(/(\[[^\]]+\])\(([^\)]*)$/);
+    if (unclosedHref) {
+        suffix += ')';
     } else {
-        const unclosedHref = text.match(/(\[[^\]]+\])\(([^\)]*)$/);
-        if (unclosedHref) {
-            text += ')';
+        const unclosedLinkText = result.match(/\[([^\]]*)$/);
+        if (unclosedLinkText) {
+            result = result.slice(0, unclosedLinkText.index) + unclosedLinkText[1];
         }
     }
 
-    const streamingTags = [
-        'Step',
-        'Sequence',
-        'TimelineEvent',
-        'Timeline',
-        'Elicitation',
-        'ElicitationsGroup',
-        'FollowUp',
-        'GenerateApp',
-        'PatchApp',
-        'GenerateWidget',
-        'PatchWidget',
-        'Carousel',
-        'Option',
-        'WritingBlock',
-        'Aspect',
-        'Comparison',
-        'Metric',
-        'Metrics',
-        'BentoItem',
-        'BentoGrid'
-    ];
-
-    for (const tag of streamingTags) {
-        const openRegex = new RegExp(`<${tag}(?:\\s+[^>]*)?>`, 'gi');
-        const closeRegex = new RegExp(`<\/${tag}>`, 'gi');
-        const openCount = (text.match(openRegex) || []).length;
-        const closeCount = (text.match(closeRegex) || []).length;
-        if (openCount > closeCount) {
-            text += `</${tag}>`.repeat(openCount - closeCount);
-        }
+    while (openXmlTags.length > 0) {
+        const tag = openXmlTags.pop();
+        suffix += `</${tag}>`;
     }
 
-    return text;
+    return result + suffix;
 }
 
-export function streamSafeParse(rawText) {
+export function streamSafeParse(rawText, options = {}) {
     if (!rawText) return '';
-    const completed = completeIncompleteMarkdown(rawText);
+    const isFinal = options && options.isFinal;
+    const completed = isFinal ? rawText : completeIncompleteMarkdown(rawText);
     if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
         return marked.parse(completed);
     }
