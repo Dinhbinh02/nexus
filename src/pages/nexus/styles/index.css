@@ -2,16 +2,9 @@
 @import "./base.css";
 @import "../../../lib/katex/katex.min.css";
 @import "./hub_layout.css";
-
-/* Core Feature Domains */
 @import "./chat.css";
 @import "./sparks.css";
-@import "./notes.css";
 @import "./tts.css";
 @import "./components.css";
-
-/* Modals & Dialogs */
 @import "./settings.css";
 @import "./search.css";
-
-

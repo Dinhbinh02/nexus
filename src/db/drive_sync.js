@@ -1,6 +1,5 @@
 import { NexusAuth, AuthService } from './google_auth.js';
 import { NexusChatDB } from './chat_db.js';
-import { NotesManager } from './notes_manager.js';
 import { TTSDB } from './tts_manager.js';
 import { NexusAttachmentDB } from './attachment_db.js';
 import { NexusAppsDB } from './apps_db.js';
@@ -42,21 +41,43 @@ export async function sha256Hash(str) {
     }
 }
 
+export function syncLog(...args) {
+    console.log(...args);
+    try {
+        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({
+                action: 'nexus_sync_log',
+                args: args.map(a => typeof a === 'object' ? JSON.parse(JSON.stringify(a)) : a)
+            }).catch(() => {});
+        }
+    } catch (e) {}
+}
+
 export const isExcludedKey = (k) => [
     'google_oauth_token', 'google_oauth_token_time',
-    'google_user_info', 'last_sync_time', 'last_sync_hash', 'last_sync_md5', 'last_sync_size', 'last_cloud_stats',
-    'drive_uploaded_blobs', 'drive_backup_file_id',
-    'settings_last_updated', 'optionsLastSection', 'optionsLastScroll', 'optionsScrollPositions',
+    'google_user_info', 'nexus_cached_user',
+    'last_sync_time', 'last_sync_hash', 'last_sync_md5', 'last_sync_size', 'last_cloud_stats',
+    'drive_uploaded_blobs', 'drive_backup_file_id', 'settings_last_updated',
+    'optionsLastSection', 'optionsLastScroll', 'optionsScrollPositions',
     'sidepanel_active_tab_index', 'sidepanel_active_group_index', 'sidepanel_secondary_tab_index',
-    'sidepanel_is_split_mode', 'sidepanel_split_ratio',
+    'sidepanel_is_split_mode', 'sidepanel_split_ratio', 'sidepanel_tabs', 'sidepanel_tab_counter',
     'nexus_active_tab_index', 'nexus_active_group_index', 'nexus_secondary_tab_index',
-    'nexus_is_split_mode', 'nexus_split_ratio',
+    'nexus_is_split_mode', 'nexus_split_ratio', 'nexus_tabs', 'nexus_tab_counter',
     'nexusWindowId', 'pendingMicToggle',
     'nexusTemplatesV3', 'nexusBatchHistoryV3', 'lastUsedGenAIModel',
     'lastUsedBatchSize', 'lastUsedDeck', 'lastUsedTemplateId', 'ankiQuickNoteContent',
-    'attachments'
-].includes(k) || k.includes('_inst_') || k.startsWith('pending_sidepanel_query_') || k.startsWith('rot_') ||
-    k === 'audio_cache' || k.startsWith('nexus_img_cache_') || k.startsWith('nexus_img_query_') || k.startsWith('spotlight_history_') || k.startsWith('yt_transcript_');
+    'attachments', 'audio_cache',
+    'lastUsedModel', 'lastUsedThinkingLevel', 'nexus_session_settings'
+].includes(k) ||
+    k.includes('_inst_') ||
+    k.startsWith('google_') ||
+    k.startsWith('nexus_session_') ||
+    k.startsWith('lumina_session_') ||
+    k.startsWith('pending_sidepanel_query_') ||
+    k.startsWith('rot_') ||
+    k.startsWith('nexus_img_cache_') ||
+    k.startsWith('nexus_img_query_') ||
+    k.startsWith('temp_');
 
 
 export class SyncManager {
@@ -78,7 +99,6 @@ export class SyncManager {
                     } else {
                         setTimeout(() => {
                             if (wrapper) wrapper.classList.remove('is-syncing');
-                            this.clearUnsynced();
                             this.notifyListeners('Synced just now', Date.now());
                         }, 500);
                     }
@@ -97,91 +117,44 @@ export class SyncManager {
         this.FILENAME = 'nexus_backup.json';
         this.listeners = [];
         this.isSyncing = false;
-        this.hasUnsyncedChanges = false;
-
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            chrome.storage.local.get(['nexus_has_unsynced'], (res) => {
-                if (res && res.nexus_has_unsynced) {
-                    this.hasUnsyncedChanges = true;
-                    this._updateUnsyncedUI(true);
-                }
-            });
-        }
 
         const isBackground = typeof window === 'undefined';
-        if (isBackground && typeof chrome !== 'undefined') {
-            if (chrome.runtime && chrome.runtime.onStartup) {
-                chrome.runtime.onStartup.addListener(() => {
-                    this.checkAutoSync(true);
-                });
-            }
-        } else if (typeof window !== 'undefined') {
+        if (typeof window !== 'undefined') {
             setTimeout(() => {
                 this.checkAutoSync(true);
             }, 200);
         }
 
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+        if (isBackground && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
             chrome.storage.onChanged.addListener((changes, area) => {
                 if (area !== 'local') return;
                 if (this.isSyncing) return;
                 const keys = Object.keys(changes);
-                const excludedKeys = [
-                    'google_oauth_token', 'google_oauth_token_time',
-                    'google_user_info', 'nexus_cached_user', 'last_sync_time', 'last_sync_hash', 'last_sync_md5', 'last_sync_size', 'last_cloud_stats',
-                    'drive_uploaded_blobs', 'drive_backup_file_id',
-                    'settings_last_updated', 'optionsLastSection', 'optionsLastScroll', 'optionsScrollPositions',
-                    'sidepanel_active_tab_index', 'sidepanel_active_group_index',
-                    'nexus_active_tab_index', 'nexus_active_group_index',
-                    'nexus_has_unsynced'
-                ];
-                const hasSettingsKeys = keys.some(k =>
-                    !k.startsWith('nexus_session_') &&
-                    !k.startsWith('google_') &&
-                    !excludedKeys.includes(k)
-                );
+                const hasSettingsKeys = keys.some(k => !isExcludedKey(k));
                 if (hasSettingsKeys) {
-                    chrome.storage.local.set({ settings_last_updated: Date.now() });
-                    this.markUnsynced();
+                    syncLog('[Sync:StorageChanged] Detected setting changes, scheduling debounced sync in 3s:', keys.filter(k => !isExcludedKey(k)));
+                    this.triggerDebouncedSync(3000);
                 }
             });
         }
     }
 
-    markUnsynced() {
-        this.hasUnsyncedChanges = true;
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            chrome.storage.local.set({ nexus_has_unsynced: true }).catch(() => {});
-        }
-        this._updateUnsyncedUI(true);
-        try {
-            chrome.runtime.sendMessage({ action: 'nexus_unsynced_status', hasUnsynced: true }).catch(() => {});
-        } catch (e) {}
-    }
-
-    clearUnsynced() {
-        this.hasUnsyncedChanges = false;
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            chrome.storage.local.set({ nexus_has_unsynced: false }).catch(() => {});
-        }
-        this._updateUnsyncedUI(false);
-        try {
-            chrome.runtime.sendMessage({ action: 'nexus_unsynced_status', hasUnsynced: false }).catch(() => {});
-        } catch (e) {}
-    }
-
-    _updateUnsyncedUI(hasUnsynced) {
-        if (typeof document !== 'undefined') {
-            const wrapper = document.getElementById('user-avatar-wrapper');
-            if (wrapper) {
-                wrapper.classList.toggle('has-unsynced', !!hasUnsynced);
-            }
-        }
-    }
-
     triggerDebouncedSync(delayMs = 1000) {
         if (!this.authService.isAuthenticated) return;
-        this.markUnsynced();
+        if (this._isPageContext()) {
+            const wrapper = (typeof document !== 'undefined') ? document.getElementById('user-avatar-wrapper') : null;
+            if (wrapper) wrapper.classList.add('is-syncing');
+            this.notifyListeners('Syncing...', null);
+            try {
+                chrome.runtime.sendMessage({ action: 'nexus_drive_sync_debounced', delayMs }).catch(() => {});
+            } catch (e) {}
+            return;
+        }
+        if (this._debounceTimer) clearTimeout(this._debounceTimer);
+        this._debounceTimer = setTimeout(() => {
+            this._debounceTimer = null;
+            this.pushToCloud().catch(err => console.error('[Sync] Debounced push failed:', err));
+        }, delayMs);
     }
 
     addListener(callback) {
@@ -380,18 +353,11 @@ export class SyncManager {
     }
 
     async gatherLocalData() {
-        const localData = await chrome.storage.local.get(null);
-
-        if (typeof NotesManager !== 'undefined') {
-            try {
-                localData.nexus_notes_collections = typeof NotesManager.getAllCollectionsRaw === 'function'
-                    ? await NotesManager.getAllCollectionsRaw()
-                    : await NotesManager.getCollections(true);
-                localData.nexus_notes_items = typeof NotesManager.getAllNotesRaw === 'function'
-                    ? await NotesManager.getAllNotesRaw()
-                    : await NotesManager.getNotes(null, true);
-            } catch (err) {
-                console.error('[Sync] Failed to gather notes for sync:', err);
+        const rawLocal = await chrome.storage.local.get(null);
+        const localData = {};
+        for (const [k, v] of Object.entries(rawLocal)) {
+            if (!isExcludedKey(k)) {
+                localData[k] = v;
             }
         }
 
@@ -409,7 +375,6 @@ export class SyncManager {
             }
         }
 
-
         if (typeof NexusChatDB !== 'undefined') {
             try {
                 const sessions = typeof NexusChatDB.getAllSessionsRaw === 'function'
@@ -425,6 +390,7 @@ export class SyncManager {
                     }
                 }
                 localData.nexus_chat_sessions = sessionsObj;
+                syncLog('[Sync:Gather] Gathered chat sessions for backup:', Object.keys(sessionsObj).length, Object.keys(sessionsObj));
             } catch (err) {
                 console.error('[Sync] Failed to load chats from IndexedDB:', err);
             }
@@ -457,20 +423,25 @@ export class SyncManager {
             const { token, remoteFile, fileId, driveFiles } = await this.getOrFindBackupFile(initialToken, force);
 
             if (!remoteFile || !fileId) {
+                syncLog('[Sync:Pull] No cloud backup file found on Google Drive.');
                 this.notifyListeners('No cloud data', null);
                 try { chrome.runtime.sendMessage({ action: 'nexus_sync_status', status: 'done', timestamp: Date.now() }).catch(() => {}); } catch (e) {}
                 return null;
             }
 
+            const localSessionData = typeof NexusChatDB !== 'undefined'
+                ? await NexusChatDB.getAllSessions().catch(() => ({}))
+                : {};
+            const localSessionCount = Object.values(localSessionData).filter(s => s && !s.isDeleted).length;
+            const lastCloudStats = (await chrome.storage.local.get(['last_cloud_stats'])).last_cloud_stats;
+            const cloudSessionCount = lastCloudStats ? lastCloudStats.chatsCount : -1;
+
+            syncLog(`[Sync:Pull] Remote MD5: ${remoteFile.md5Checksum} | Local MD5: ${localSync.last_sync_md5 || 'None'} | Local Sessions: ${localSessionCount} | Cloud Sessions: ${cloudSessionCount}`);
+
             if (!force && remoteFile.md5Checksum && localSync.last_sync_md5 && remoteFile.md5Checksum === localSync.last_sync_md5) {
-                const localSessionData = typeof NexusChatDB !== 'undefined'
-                    ? await NexusChatDB.getAllSessions().catch(() => ({}))
-                    : {};
-                const localSessionCount = Object.values(localSessionData).filter(s => s && !s.isDeleted).length;
-                const lastCloudStats = (await chrome.storage.local.get(['last_cloud_stats'])).last_cloud_stats;
-                const cloudSessionCount = lastCloudStats ? lastCloudStats.chatsCount : -1;
                 if (localSessionCount >= cloudSessionCount) {
                     const now = Date.now();
+                    syncLog('[Sync:Pull] Remote MD5 matches last_sync_md5 and local sessions valid. Skipping download.');
                     this.notifyListeners('Synced just now', now);
                     try { chrome.runtime.sendMessage({ action: 'nexus_sync_status', status: 'done', timestamp: now }).catch(() => {}); } catch (e) {}
                     return now;
@@ -526,76 +497,47 @@ export class SyncManager {
 
             if (typeof NexusChatDB !== 'undefined') {
                 try {
+                    syncLog('[Sync:Pull] Applying chat sessions from cloud. Remote count:', Object.keys(remoteSessions).length);
                     const currentSessions = await NexusChatDB.getAllSessions().catch(() => ({}));
-                    for (const s of Object.values(currentSessions)) {
-                        if (s && s.id && !remoteSessions[s.id]) {
-                            await NexusChatDB.deleteSession(s.id).catch(() => {});
-                        }
-                    }
+                    syncLog('[Sync:Pull] Current local sessions in IndexedDB:', Object.keys(currentSessions).length, Object.keys(currentSessions));
+                    
                     for (const [sid, sessionMeta] of Object.entries(remoteSessions)) {
-                        await NexusChatDB.putSession(sessionMeta).catch(() => {});
                         if (sessionMeta && sessionMeta.isDeleted) {
+                            syncLog('[Sync:Pull] Session marked deleted in cloud, deleting locally:', sid);
                             await NexusChatDB.deleteSession(sid).catch(() => {});
                         } else {
+                            await NexusChatDB.putSession(sessionMeta).catch(() => {});
                             const sessionKey = `nexus_session_${sid}`;
                             const messages = remoteData[sessionKey] || remoteData[`lumina_session_${sid}`];
                             if (Array.isArray(messages)) {
                                 await NexusChatDB.putMessages(sid, messages).catch(() => {});
                                 cloudUpdatedSessionIds.push(sid);
                                 for (const msg of messages) {
-                                    if (msg && Array.isArray(msg.images)) {
-                                        for (const img of msg.images) {
-                                            if (img && typeof img === 'object' && img.attachmentId) {
-                                                activeAttachmentIds.add(img.attachmentId);
-                                            }
+                                    const rawFiles = Array.isArray(msg.files) ? msg.files : (Array.isArray(msg.images) ? msg.images : []);
+                                    for (const f of rawFiles) {
+                                        if (f && typeof f === 'object' && f.attachmentId) {
+                                            activeAttachmentIds.add(f.attachmentId);
                                         }
                                     }
                                 }
                             }
                         }
                     }
+
+                    for (const sid of Object.keys(currentSessions)) {
+                        const localMsgs = await NexusChatDB.getMessages(sid).catch(() => []);
+                        for (const msg of localMsgs) {
+                            const rawFiles = Array.isArray(msg.files) ? msg.files : (Array.isArray(msg.images) ? msg.images : []);
+                            for (const f of rawFiles) {
+                                if (f && typeof f === 'object' && f.attachmentId) {
+                                    activeAttachmentIds.add(f.attachmentId);
+                                }
+                            }
+                        }
+                    }
+                    syncLog('[Sync:Pull] Updated sessions from cloud:', cloudUpdatedSessionIds.length, cloudUpdatedSessionIds);
                 } catch (err) {
                     console.error('[Sync] Failed to apply chats from cloud:', err);
-                }
-            }
-
-            if (typeof NotesManager !== 'undefined') {
-                try {
-                    const remoteCollections = remoteData.nexus_notes_collections || remoteData.lumina_notes_collections;
-                    const remoteNotes = remoteData.nexus_notes_items || remoteData.lumina_notes_items;
-                    const db = await NotesManager.getDB();
-
-                    if (Array.isArray(remoteCollections)) {
-                        const remoteColIds = new Set(remoteCollections.map(c => c && c.id).filter(Boolean));
-                        const currentCols = await NotesManager.getCollections().catch(() => []);
-                        const txCol = db.transaction(NotesManager.STORE_COLLECTIONS, 'readwrite');
-                        const storeCol = txCol.objectStore(NotesManager.STORE_COLLECTIONS);
-                        for (const c of currentCols) {
-                            if (c && c.id && !remoteColIds.has(c.id)) {
-                                storeCol.delete(c.id);
-                            }
-                        }
-                        for (const col of remoteCollections) {
-                            if (col && col.id) storeCol.put(col);
-                        }
-                    }
-
-                    if (Array.isArray(remoteNotes)) {
-                        const remoteNoteIds = new Set(remoteNotes.map(n => n && n.id).filter(Boolean));
-                        const currentNotes = await NotesManager.getNotes().catch(() => []);
-                        const txNote = db.transaction(NotesManager.STORE_NOTES, 'readwrite');
-                        const storeNote = txNote.objectStore(NotesManager.STORE_NOTES);
-                        for (const n of currentNotes) {
-                            if (n && n.id && !remoteNoteIds.has(n.id)) {
-                                storeNote.delete(n.id);
-                            }
-                        }
-                        for (const note of remoteNotes) {
-                            if (note && note.id) storeNote.put(note);
-                        }
-                    }
-                } catch (err) {
-                    console.error('[Sync] Failed to apply notes from cloud:', err);
                 }
             }
 
@@ -655,13 +597,16 @@ export class SyncManager {
             }
 
             let actualDriveFiles = driveFiles;
-            if (!actualDriveFiles && (activeAttachmentIds.size > 0 || activeTtsRecMap.size > 0)) {
+            if (!actualDriveFiles || activeAttachmentIds.size > 0 || activeTtsRecMap.size > 0) {
                 actualDriveFiles = await this.listAppDataFiles(token).catch(() => []);
             }
             const driveFileMap = new Map((actualDriveFiles || []).map(f => [f.name, f]));
 
+            syncLog(`[Sync:Attachments:Pull] Active attachment IDs needed across sessions (${activeAttachmentIds.size}):`, Array.from(activeAttachmentIds));
+
             if (typeof NexusAttachmentDB !== 'undefined' && NexusAttachmentDB.init) {
                 const db = await NexusAttachmentDB.init();
+                let downloadedCount = 0;
                 for (const [filename, fileObj] of driveFileMap.entries()) {
                     if (filename.startsWith('att_') && filename.endsWith('.bin')) {
                         const key = filename.slice(4, -4);
@@ -669,17 +614,21 @@ export class SyncManager {
                             const exists = await NexusAttachmentDB.get(key).catch(() => null);
                             if (!exists) {
                                 try {
+                                    syncLog(`[Sync:Attachments:Pull] Downloading attachment ${key} (${fileObj.size} bytes)...`);
                                     const downloadedBlob = await this.downloadBlobFile(token, fileObj.id);
                                     if (downloadedBlob) {
                                         await NexusAttachmentDB.put(key, downloadedBlob);
+                                        downloadedCount++;
+                                        syncLog(`[Sync:Attachments:Pull] Saved attachment ${key} to local IndexedDB.`);
                                     }
                                 } catch (err) {
-                                    console.warn(`[Sync] Failed to download attachment ${key}:`, err);
+                                    console.warn(`[Sync:Attachments:Pull] Failed to download attachment ${key}:`, err);
                                 }
                             }
                         }
                     }
                 }
+                syncLog(`[Sync:Attachments:Pull] Completed attachment download check. Downloaded ${downloadedCount} new attachments.`);
 
                 try {
                     const metadata = await NexusAttachmentDB.getAllMetadata();
@@ -720,15 +669,17 @@ export class SyncManager {
             const now = Date.now();
             const cloudStats = {
                 chatsCount: Object.values(remoteSessions).filter(s => s && !s.isDeleted).length,
-                notesCount: Array.isArray(remoteData.nexus_notes_items) ? remoteData.nexus_notes_items.filter(n => n && !n.isDeleted).length : 0,
-                collectionsCount: Array.isArray(remoteData.nexus_notes_collections) ? remoteData.nexus_notes_collections.length : 0,
                 highlightsCount: Object.keys(remoteData).filter(k => k.startsWith('highlights_')).length,
                 ttsCount: Array.isArray(remoteData.nexus_tts_recordings) ? remoteData.nexus_tts_recordings.filter(r => r && !r.isDeleted).length : 0,
                 appsCount: (remoteData.nexus_custom_apps && typeof remoteData.nexus_custom_apps === 'object') ? Object.keys(remoteData.nexus_custom_apps).length : 0,
                 attachmentsCount: activeAttachmentIds.size
             };
+            const currentGathered = await this.gatherLocalData();
+            const localDataHash = await sha256Hash(JSON.stringify(currentGathered));
+            syncLog('[Sync:Pull] Successfully applied cloud data. Saved localDataHash:', localDataHash);
             await chrome.storage.local.set({
                 last_sync_time: now,
+                last_sync_hash: localDataHash,
                 last_sync_md5: remoteFile ? remoteFile.md5Checksum : null,
                 last_sync_size: remoteFile ? remoteFile.size : null,
                 last_cloud_stats: cloudStats
@@ -742,7 +693,6 @@ export class SyncManager {
                         chrome.runtime.sendMessage({ action: 'nexus_session_updated', sessionId: sid, source: 'cloud_sync' }).catch(() => {});
                     }
                 }
-                chrome.runtime.sendMessage({ action: 'nexus_notes_updated' }).catch(() => {});
                 chrome.runtime.sendMessage({ action: 'nexus_highlights_updated' }).catch(() => {});
                 chrome.runtime.sendMessage({ action: 'nexus_apps_updated' }).catch(() => {});
                 if (ttsUpdated) {
@@ -751,7 +701,6 @@ export class SyncManager {
                 chrome.runtime.sendMessage({ action: 'nexus_sync_status', status: 'done', timestamp: now }).catch(() => {});
             } catch (e) {}
 
-            this.clearUnsynced();
             this.notifyListeners('Synced just now', now);
             return now;
         } catch (error) {
@@ -764,23 +713,40 @@ export class SyncManager {
         }
     }
 
-    async pushToCloud() {
+    async pushToCloud(forcePush = false) {
         if (this._isPageContext()) {
-            return await this._delegateSyncToBackground('nexus_drive_sync', { isAuto: false, forcePush: true });
+            return await this._delegateSyncToBackground('nexus_drive_sync', { isAuto: false, forcePush });
         }
-        if (this.isSyncing) return;
+        if (this.isSyncing) {
+            syncLog('[Sync:Push] Already syncing, skip duplicate push request');
+            return;
+        }
         this.isSyncing = true;
+        this.notifyListeners('Syncing...', null);
+        try { chrome.runtime.sendMessage({ action: 'nexus_sync_status', status: 'syncing' }).catch(() => {}); } catch (e) {}
         try {
             const initialToken = await this.getToken(true);
             if (!initialToken) throw new Error('Not authenticated');
 
-            let { token, fileId, driveFiles } = await this.getOrFindBackupFile(initialToken, false);
             const localData = await this.gatherLocalData();
-
-            this.notifyListeners('Syncing...', null);
-            try { chrome.runtime.sendMessage({ action: 'nexus_sync_status', status: 'syncing' }).catch(() => {}); } catch (e) {}
-
             const dataToUpload = { ...localData };
+            const currentDataHash = await sha256Hash(JSON.stringify(dataToUpload));
+
+            const storedSync = await chrome.storage.local.get(['last_sync_hash', 'last_sync_md5', 'drive_backup_file_id', 'last_sync_time']);
+
+            syncLog('[Sync:Push] Hash comparison -> currentHash:', currentDataHash, 'storedHash:', storedSync.last_sync_hash, 'forcePush:', forcePush);
+
+            if (!forcePush && storedSync.last_sync_hash && storedSync.last_sync_hash === currentDataHash && storedSync.drive_backup_file_id) {
+                const now = Date.now();
+                syncLog('[Sync:Push] No data changes detected (hash matched). Skipping upload.');
+                this.notifyListeners('Synced just now', storedSync.last_sync_time || now);
+                try { chrome.runtime.sendMessage({ action: 'nexus_sync_status', status: 'done', timestamp: storedSync.last_sync_time || now }).catch(() => {}); } catch (e) {}
+                return storedSync.last_sync_time || now;
+            }
+
+            syncLog('[Sync:Push] Changes detected or forcePush. Uploading backup to Google Drive...');
+            let { token, fileId, driveFiles } = await this.getOrFindBackupFile(initialToken, false);
+
             const payload = {
                 timestamp: new Date().toISOString(),
                 version: chrome.runtime.getManifest().version,
@@ -834,18 +800,24 @@ export class SyncManager {
                     req.onerror = () => resolve(map);
                 });
 
+                syncLog(`[Sync:Attachments:Push] Scanning local attachments in IndexedDB: ${localAttachments.size} items.`);
+                let uploadedCount = 0;
                 for (const [key, blob] of localAttachments.entries()) {
                     const filename = `att_${key}.bin`;
                     if (!uploadedBlobSet.has(filename) && blob) {
                         try {
+                            syncLog(`[Sync:Attachments:Push] Uploading new attachment ${filename} (${blob.size} bytes)...`);
                             await this.uploadBlobFile(token, filename, blob);
                             uploadedBlobSet.add(filename);
                             hasNewBlobs = true;
+                            uploadedCount++;
+                            syncLog(`[Sync:Attachments:Push] Successfully uploaded ${filename}`);
                         } catch (err) {
-                            console.warn(`[Sync] Failed to upload attachment ${key}:`, err);
+                            console.warn(`[Sync:Attachments:Push] Failed to upload attachment ${key}:`, err);
                         }
                     }
                 }
+                syncLog(`[Sync:Attachments:Push] Completed attachment upload check. Uploaded ${uploadedCount} new files. Total in state: ${uploadedBlobSet.size}`);
             }
 
             if (typeof TTSDB !== 'undefined') {
@@ -873,8 +845,6 @@ export class SyncManager {
             const now = Date.now();
             const cloudStats = {
                 chatsCount: Object.values(localData.nexus_chat_sessions || {}).filter(s => s && !s.isDeleted).length,
-                notesCount: Array.isArray(localData.nexus_notes_items) ? localData.nexus_notes_items.filter(n => n && !n.isDeleted).length : 0,
-                collectionsCount: Array.isArray(localData.nexus_notes_collections) ? localData.nexus_notes_collections.length : 0,
                 highlightsCount: Object.keys(localData).filter(k => k.startsWith('highlights_')).length,
                 ttsCount: Array.isArray(localData.nexus_tts_recordings) ? localData.nexus_tts_recordings.filter(r => r && !r.isDeleted).length : 0,
                 appsCount: (localData.nexus_custom_apps && typeof localData.nexus_custom_apps === 'object') ? Object.keys(localData.nexus_custom_apps).length : 0,
@@ -882,6 +852,7 @@ export class SyncManager {
             };
             await chrome.storage.local.set({
                 last_sync_time: now,
+                last_sync_hash: currentDataHash,
                 last_sync_md5: newUploadedMd5,
                 last_sync_size: newUploadedSize,
                 last_cloud_stats: cloudStats
@@ -889,7 +860,6 @@ export class SyncManager {
 
             if (typeof globalThis !== 'undefined') globalThis._lastDriveSyncAt = now;
 
-            this.clearUnsynced();
             this.notifyListeners('Synced just now', now);
             try { chrome.runtime.sendMessage({ action: 'nexus_sync_status', status: 'done', timestamp: now }).catch(() => {}); } catch (e) {}
             return now;

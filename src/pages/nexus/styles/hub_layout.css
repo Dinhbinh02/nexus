@@ -22,7 +22,6 @@
 
 .nexus-main-content[data-active-view="chat"] #chat-page,
 .nexus-main-content[data-active-view="apps"] #apps-page,
-.nexus-main-content[data-active-view="notes"] #notes-page,
 .nexus-main-content[data-active-view="sparks"] #sparks-page,
 .nexus-main-content[data-active-view="tts"] #tts-page {
     display: flex !important;
@@ -74,23 +73,20 @@
 }
 
 .nexus-topbar-left .sidebar-toggle-btn,
-.topbar.nexus-view-topbar .sidebar-toggle-btn,
-#notes-sidebar-toggle-btn {
+.topbar.nexus-view-topbar .sidebar-toggle-btn {
     display: none;
 }
 
 @media (max-width: 768px) {
 
     .nexus-topbar-left .sidebar-toggle-btn,
-    .topbar.nexus-view-topbar .sidebar-toggle-btn,
-    #notes-sidebar-toggle-btn {
+    .topbar.nexus-view-topbar .sidebar-toggle-btn {
         display: flex;
     }
 }
 
 .is-sidepanel .nexus-topbar-left .sidebar-toggle-btn,
-.is-sidepanel .topbar.nexus-view-topbar .sidebar-toggle-btn,
-.is-sidepanel #notes-sidebar-toggle-btn {
+.is-sidepanel .topbar.nexus-view-topbar .sidebar-toggle-btn {
     display: flex;
 }
 
@@ -1056,13 +1052,6 @@
     box-sizing: border-box !important;
 }
 
-.notes-editor-header {
-    border-bottom: none !important;
-}
-
-.notes-editor-header::after {
-    display: none !important;
-}
 
 .nexus-search-match {
     background: #FEF08A;

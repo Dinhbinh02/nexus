@@ -5,7 +5,6 @@ async function gatherLocalStats() {
     const stats = {
         storage: {},
         chats: { sessionCount: 0, sessions: [] },
-        notes: { collectionsCount: 0, notesCount: 0 },
         tts: { recordingsCount: 0 },
         apps: { count: 0, list: [] },
         attachments: { count: 0 }
@@ -43,18 +42,6 @@ async function gatherLocalStats() {
         }
     }
 
-    if (typeof NotesManager !== 'undefined') {
-        try {
-            const notes = await NotesManager.getNotes().catch(() => []);
-            const cols = await NotesManager.getCollections().catch(() => []);
-            stats.notes.notesCount = notes.filter(n => n && !n.isDeleted).length;
-            stats.notes.collectionsCount = cols.length;
-        } catch (e) {
-            stats.notes.error = e.message;
-        }
-    }
-
-
     if (typeof TTSDB !== 'undefined') {
         try {
             const recs = await TTSDB.getAllRecordings().catch(() => []);
@@ -64,13 +51,11 @@ async function gatherLocalStats() {
         }
     }
 
-    if (typeof NexusAttachmentDB !== 'undefined') {
-        try {
-            const meta = await NexusAttachmentDB.getAllMetadata().catch(() => []);
-            stats.attachments.count = meta.length;
-        } catch (e) {
-            stats.attachments.error = e.message;
-        }
+    try {
+        const atts = await NexusAttachmentDB.getAll().catch(() => []);
+        stats.attachments.count = atts.length;
+    } catch (e) {
+        stats.attachments.error = e.message;
     }
 
     return stats;
@@ -80,21 +65,22 @@ async function gatherCloudStats(token) {
     const stats = {
         backupFile: null,
         chats: { sessionCount: 0, sessions: [] },
-        notes: { collectionsCount: 0, notesCount: 0 },
         tts: { recordingsCount: 0 },
         apps: { count: 0, list: [] },
-        attachments: { count: 0 },
-        driveFiles: []
+        attachments: { count: 0 }
     };
 
-    const { token: activeToken, remoteFile, fileId, driveFiles } = await NexusSync.getOrFindBackupFile(token, true);
+    const activeToken = token || await NexusSync.getToken(false);
+    if (!activeToken) return { stats, activeToken: null };
 
-    stats.driveFiles = (driveFiles || []).map(f => ({
-        name: f.name,
-        size: f.size,
-        md5: f.md5Checksum,
-        modifiedTime: f.modifiedTime
-    }));
+    const driveFiles = await NexusSync.listAppDataFiles(activeToken).catch(() => []);
+
+    const backupFiles = driveFiles.filter(f => f.name === 'nexus_data_backup.json.gz');
+    const legacyBackupFiles = driveFiles.filter(f => f.name === 'lumina_data_backup.json.gz');
+    const primaryFile = backupFiles[0] || legacyBackupFiles[0];
+
+    const fileId = primaryFile?.id || (await chrome.storage.local.get(['drive_backup_file_id'])).drive_backup_file_id;
+    const remoteFile = primaryFile || (fileId ? await NexusSync.getDriveFileMetadata(activeToken, fileId) : null);
 
     if (!remoteFile || !fileId) {
         stats.backupFile = null;
@@ -123,10 +109,6 @@ async function gatherCloudStats(token) {
         messageCount: s.messageCount || '?'
     }));
 
-    const cloudNotes = data.nexus_notes_items || [];
-    const cloudCols = data.nexus_notes_collections || [];
-    stats.notes.notesCount = cloudNotes.filter(n => n && !n.isDeleted).length;
-    stats.notes.collectionsCount = cloudCols.length;
     const cloudTts = data.nexus_tts_recordings || [];
     stats.tts.recordingsCount = cloudTts.filter(r => r && !r.isDeleted).length;
 
@@ -180,23 +162,17 @@ export async function debugSync() {
         ? NexusAuth.isAuthenticated
         : !!syncStorageData.google_user_info;
 
-    let token = null;
-    if (isAuthenticated) {
-        try {
-            token = await NexusSync.getToken(false);
-        } catch (e) {
-            console.warn('[SyncDebug] Could not get token:', e.message);
-        }
-    }
+    const token = await NexusSync.getToken(false).catch(() => null);
 
     const lastSyncAt = syncStorageData.last_sync_time
         ? new Date(syncStorageData.last_sync_time).toLocaleString()
         : 'Never';
 
-    console.log('%cSync state:', 'color: #fbbf24; font-weight: bold');
+    console.log('%c⚙️ SYNC STATUS', 'color: #93c5fd; font-weight: bold; font-size: 14px;');
     console.table({
         'Authenticated': isAuthenticated ? '✅ Yes' : '❌ No',
-        'Token acquired': token ? '✅ Yes' : '❌ No',
+        'Google User': syncStorageData.google_user_info?.name || syncStorageData.google_user_info?.email || '—',
+        'Token cached': token ? '✅ Yes' : '❌ No',
         'Last sync': lastSyncAt,
         'Last sync MD5': syncStorageData.last_sync_md5 || '—',
         'Last sync size': syncStorageData.last_sync_size ? `${(syncStorageData.last_sync_size / 1024).toFixed(1)} KB` : '—',
@@ -206,8 +182,6 @@ export async function debugSync() {
     console.log('%c📱 LOCAL DATA', 'color: #6ee7b7; font-weight: bold; font-size: 14px;');
     console.table({
         'Chat sessions': localStats.chats.sessionCount,
-        'Notes': localStats.notes.notesCount,
-        'Note collections': localStats.notes.collectionsCount,
         'TTS recordings': localStats.tts.recordingsCount,
         'Custom apps': localStats.apps.count,
         'Attachments': localStats.attachments.count
@@ -254,8 +228,6 @@ export async function debugSync() {
 
     console.table({
         'Chat sessions': cloudStats.chats.sessionCount,
-        'Notes': cloudStats.notes.notesCount,
-        'Note collections': cloudStats.notes.collectionsCount,
         'TTS recordings': cloudStats.tts.recordingsCount,
         'Custom apps': cloudStats.apps.count,
         'Attachments': cloudStats.attachments.count
@@ -270,8 +242,6 @@ export async function debugSync() {
     const diff = {
         'Chat sessions (local)': localStats.chats.sessionCount,
         'Chat sessions (cloud)': cloudStats.chats.sessionCount,
-        'Notes (local)': localStats.notes.notesCount,
-        'Notes (cloud)': cloudStats.notes.notesCount,
         'TTS (local)': localStats.tts.recordingsCount,
         'TTS (cloud)': cloudStats.tts.recordingsCount,
         'Apps (local)': localStats.apps.count,

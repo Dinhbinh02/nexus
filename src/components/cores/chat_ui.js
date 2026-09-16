@@ -172,6 +172,9 @@ export class NexusChatUI {
     }
 
     constructor(container, options = {}) {
+        if (container && typeof container.querySelector !== 'function') {
+            container = null;
+        }
         this.container = container;
         this.options = {
             isNexus: (options.isNexus !== undefined) ? options.isNexus : (options.isSpotlight || false),
@@ -4753,6 +4756,18 @@ export class NexusChatUI {
             previewUrl: src,
             name: alt
         });
+    }
+
+    static showImagePreview(src, alt = '') {
+        const dummy = Object.create(NexusChatUI.prototype);
+        dummy.attachedFiles = [];
+        dummy.showImagePreview(src, alt);
+    }
+
+    static showFilePreview(fileObj) {
+        const dummy = Object.create(NexusChatUI.prototype);
+        dummy.attachedFiles = [];
+        dummy.showFilePreview(fileObj);
     }
 }
 

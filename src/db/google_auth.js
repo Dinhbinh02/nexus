@@ -79,13 +79,6 @@ export class AuthService {
         }
         this.isInitialized = true;
         this.notifyListeners(this.isAuthenticated, this.user);
-        if (this.isAuthenticated && typeof window !== 'undefined') {
-            setTimeout(() => {
-                if (typeof NexusSync !== 'undefined') {
-                    NexusSync.checkAutoSync(true);
-                }
-            }, 100);
-        }
     }
     async _refreshTokenIfNeeded() {
         if (!this.isAuthenticated) return;

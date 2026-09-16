@@ -190,12 +190,17 @@ export const ChatHistoryManager = {
                 return msg;
             });
 
-            await NexusChatDB.putMessages(activeSessionId, optimizedMessages);
-
             const existingSession = await NexusChatDB.getSession(activeSessionId) || {};
+            const existingMessages = await NexusChatDB.getMessages(activeSessionId).catch(() => []);
             const isRenamed = existingSession.isRenamed || false;
             const autoNamed = existingSession.autoNamed || false;
             const finalTitle = (isRenamed || autoNamed) ? existingSession.title : title;
+
+            if (!force && existingSession.id && existingMessages.length === optimizedMessages.length && JSON.stringify(existingMessages) === JSON.stringify(optimizedMessages) && existingSession.title === finalTitle) {
+                return;
+            }
+
+            await NexusChatDB.putMessages(activeSessionId, optimizedMessages);
             const questions = messages
                 .map((m, idx) => ({ ...m, originalIndex: idx }))
                 .filter(m => m.type === 'question')
@@ -245,6 +250,7 @@ export const ChatHistoryManager = {
             };
 
             await NexusChatDB.putSession(sessionMeta);
+            console.log('[NexusChatDB:putSession]', activeSessionId, 'Title:', finalTitle, 'Messages saved:', optimizedMessages.length);
 
             if (sparkId) {
                 const finalModel = (extraSettings && extraSettings.selectedModel) || existingSession.selectedModel || null;
@@ -270,6 +276,9 @@ export const ChatHistoryManager = {
                 chrome.runtime.sendMessage({ action: 'nexus_session_updated', sessionId: activeSessionId, source: 'local_save', senderInstanceId }).catch(() => { });
             }
             chrome.runtime.sendMessage({ action: 'nexus_sessions_index_updated', senderInstanceId }).catch(() => { });
+            if (typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
+                NexusSync.triggerDebouncedSync();
+            }
         } catch (error) {
             console.error('Failed to save chat history:', error);
         }
@@ -474,13 +483,12 @@ export const ChatHistoryManager = {
                     questionDiv.setAttribute('data-raw-text', msg.content);
                     if (msg.files) questionDiv.dataset.files = JSON.stringify(msg.files);
 
-                    const visibleImages = Array.isArray(msg.files)
-                        ? msg.files.filter((imgItem) => {
-                            if (typeof imgItem === 'string') return true;
-                            if (!imgItem || typeof imgItem !== 'object') return false;
-                            return !imgItem.hiddenInPreview && !imgItem.parentAttachmentId;
-                        })
-                        : [];
+                    const rawFiles = Array.isArray(msg.files) ? msg.files : (Array.isArray(msg.images) ? msg.images : []);
+                    const visibleImages = rawFiles.filter((imgItem) => {
+                        if (typeof imgItem === 'string') return true;
+                        if (!imgItem || typeof imgItem !== 'object') return false;
+                        return !imgItem.hiddenInPreview && !imgItem.parentAttachmentId;
+                    });
 
                     if (visibleImages.length > 0) {
                         questionDiv._nexusImages = visibleImages;
@@ -515,28 +523,35 @@ export const ChatHistoryManager = {
                         visibleImages.forEach(item => {
                             const isImage = item.isImage || (item.mimeType && item.mimeType.startsWith('image/'));
                             const rawSrc = item.objectUrl || item.dataUrl || item.previewUrl || (item.mimeType && item.data ? `data:${item.mimeType};base64,${item.data}` : '');
-                            const src = isImage ? (rawSrc.startsWith('data:') || rawSrc.startsWith('blob:') ? rawSrc : (typeof NexusChatUI !== 'undefined' ? NexusChatUI._resolveImagePreviewSrc(item, rawSrc) : rawSrc)) : rawSrc;
+                            const src = isImage ? (rawSrc.startsWith('data:') || rawSrc.startsWith('blob:') ? rawSrc : (typeof NexusChatUI !== 'undefined' && typeof NexusChatUI._resolveImagePreviewSrc === 'function' ? NexusChatUI._resolveImagePreviewSrc(item, rawSrc) : rawSrc)) : rawSrc;
                             if (isImage) {
                                 const img = document.createElement('img');
-                                img.src = src;
+                                if (src) img.src = src;
                                 if (item.attachmentId) {
                                     img.dataset.attachmentId = item.attachmentId;
+                                    if (!src) {
+                                        NexusAttachmentDB.get(item.attachmentId).then(blob => {
+                                            if (blob) {
+                                                img.src = URL.createObjectURL(blob);
+                                            }
+                                        }).catch(() => {});
+                                    }
                                 }
                                 if (item.name) img.alt = item.name;
                                 img.className = 'nexus-clickable-image';
                                 img.addEventListener('click', (e) => {
                                     e.stopPropagation();
-                                    if (typeof NexusChatUI !== 'undefined') {
+                                    if (img.src && typeof NexusChatUI !== 'undefined' && typeof NexusChatUI.showImagePreview === 'function') {
                                         NexusChatUI.showImagePreview(img.src, img.alt);
                                     }
                                 });
                                 filesDiv.appendChild(img);
                             } else {
                                 const fileName = item.name || 'File';
-                                const displayName = typeof NexusChatUI !== 'undefined' ? NexusChatUI.getDisplayFileName(fileName) : fileName;
-                                const category = typeof NexusChatUI !== 'undefined' ? NexusChatUI.inferFileCategory(item) : 'other';
-                                const icon = typeof NexusChatUI !== 'undefined' ? NexusChatUI.getFileIconByCategory(category) : '📄';
-                                const typeLabel = typeof NexusChatUI !== 'undefined' ? NexusChatUI.getFileTypeLabel(item) : '';
+                                const displayName = typeof NexusChatUI !== 'undefined' && typeof NexusChatUI.getDisplayFileName === 'function' ? NexusChatUI.getDisplayFileName(fileName) : fileName;
+                                const category = typeof NexusChatUI !== 'undefined' && typeof NexusChatUI.inferFileCategory === 'function' ? NexusChatUI.inferFileCategory(item) : 'other';
+                                const icon = typeof NexusChatUI !== 'undefined' && typeof NexusChatUI.getFileIconByCategory === 'function' ? NexusChatUI.getFileIconByCategory(category) : '📄';
+                                const typeLabel = typeof NexusChatUI !== 'undefined' && typeof NexusChatUI.getFileTypeLabel === 'function' ? NexusChatUI.getFileTypeLabel(item) : '';
                                 const fileChip = document.createElement('div');
                                 fileChip.className = 'nexus-preview-item is-file nexus-question-file-chip';
                                 if (item.attachmentId) {
@@ -556,7 +571,9 @@ export const ChatHistoryManager = {
                                         const dataUrl = await NexusAttachmentDB.blobToDataURL(blob);
                                         const imgEl = entryDiv.querySelector(`[data-attachment-id="${imgItem.attachmentId}"]`);
                                         if (imgEl && dataUrl) {
-                                            imgEl.src = dataUrl;
+                                            if (imgEl.tagName === 'IMG') {
+                                                imgEl.src = dataUrl;
+                                            }
                                         }
                                     }
                                 }).catch(err => console.error('Failed to hydrate attachment preview in restoreChat', err));
@@ -1092,7 +1109,10 @@ export const ChatHistoryManager = {
     },
 
     async getSessionMessages(sessionId) {
-        return await NexusChatDB.getMessages(sessionId) || [];
+        if (!sessionId) return [];
+        const msgs = await NexusChatDB.getMessages(sessionId) || [];
+        console.log('[NexusChatDB:getMessages]', sessionId, 'Messages found:', msgs.length);
+        return msgs;
     },
 
     async saveSessionMessages(sessionId, messages) {

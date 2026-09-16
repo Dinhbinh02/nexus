@@ -66,11 +66,9 @@
 
     const viewParam = urlParams.get('view') || 'chat';
     const appId = urlParams.get('app') || urlParams.get('appId');
-    const noteId = urlParams.get('note') || urlParams.get('noteId');
 
     const pageIdMap = {
         apps: 'apps-page',
-        notes: 'notes-page',
         sparks: 'sparks-page',
         tts: 'tts-page',
         chat: 'chat-page'
@@ -79,7 +77,6 @@
 
     const titleMap = {
         apps: 'Apps',
-        notes: 'Notes',
         sparks: 'Sparks',
         tts: 'TTS Studio',
         chat: 'Nexus'
@@ -93,10 +90,6 @@
         #apps-page.is-detail { display: flex !important; }
         #apps-hub-view { display: none !important; }
         #apps-studio-view { display: flex !important; }
-        ` : ''}
-        ${viewParam === 'notes' && noteId ? `
-        #notes-hub-view { display: none !important; }
-        #notes-detail-view { display: flex !important; }
         ` : ''}
     `);
 

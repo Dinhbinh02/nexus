@@ -1,6 +1,5 @@
 export * from './attachment_db.js';
 export * from './chat_db.js';
-export * from './notes_manager.js';
 export * from './chat_history.js';
 export * from './migration.js';
 export * from './tts_manager.js';
@@ -8,4 +7,3 @@ export * from './drive_sync.js';
 export * from './google_auth.js';
 export * from './sync_debugger.js';
 export * from './apps_db.js';
-

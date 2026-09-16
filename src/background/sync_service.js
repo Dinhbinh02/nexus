@@ -1,6 +1,5 @@
 import { NexusSync } from '../db/drive_sync.js';
 import '../db/chat_db.js';
-import '../db/notes_manager.js';
 import '../db/attachment_db.js';
 import '../db/tts_manager.js';
 
@@ -16,7 +15,7 @@ export function initSyncHandlers() {
             } catch (e) { }
 
             const syncPromise = forcePush
-                ? NexusSync.pushToCloud()
+                ? NexusSync.pushToCloud(forcePush)
                 : (forcePull || isAuto)
                     ? NexusSync.pullFromCloud(forcePull)
                     : NexusSync.syncData(isAuto);

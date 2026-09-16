@@ -2442,20 +2442,12 @@ export class NexusSettingsModal {
       let configSize = 0;
       let cacheSize = 0;
       Object.keys(items).forEach(key => {
-        if (key === 'attachments') {
-          chrome.storage.local.remove('attachments');
-          return;
-        }
-        const isAnkiKey = key.startsWith('rot_') || [
-          'nexusTemplatesV3', 'nexusBatchHistoryV3', 'lastUsedGenAIModel',
-          'lastUsedBatchSize', 'lastUsedDeck', 'lastUsedTemplateId', 'ankiQuickNoteContent'
-        ].includes(key);
-        if (isAnkiKey) return;
+        if (key.startsWith('rot_')) return;
         const valueStr = JSON.stringify(items[key]);
         const sizeBytes = valueStr ? valueStr.length : 0;
         if (key === 'nexus_chat_sessions' || key.startsWith('nexus_session_') || key.startsWith('nexus_history_')) {
           return;
-        } else if (key.startsWith('spotlight_history_') || key === 'audio_cache' || key.startsWith('nexus_img_cache_') || key.startsWith('nexus_img_query_') || key.startsWith('yt_transcript_')) {
+        } else if (key === 'audio_cache' || key.startsWith('nexus_img_cache_') || key.startsWith('nexus_img_query_')) {
           cacheSize += sizeBytes;
         } else {
           configSize += sizeBytes;
@@ -2704,22 +2696,16 @@ export class NexusSettingsModal {
       try {
         const cloudStats = res.last_cloud_stats || null;
         let sessionCount = 0;
-        let noteCount = 0;
         let highlightCount = 0;
         let appsCount = 0;
         if (cloudStats) {
           sessionCount = cloudStats.chatsCount || 0;
-          noteCount = cloudStats.notesCount || 0;
           highlightCount = cloudStats.highlightsCount || 0;
           appsCount = cloudStats.appsCount || 0;
         } else if (res.last_sync_time) {
           if (typeof NexusChatDB !== 'undefined') {
             const sessions = await NexusChatDB.getAllSessions().catch(() => ({}));
             sessionCount = Object.keys(sessions || {}).length;
-          }
-          if (typeof NotesManager !== 'undefined') {
-            const notes = await NotesManager.getNotes().catch(() => []);
-            noteCount = notes.length;
           }
           if (Array.isArray(res.nexus_highlights)) {
             highlightCount = res.nexus_highlights.length;
@@ -2736,14 +2722,14 @@ export class NexusSettingsModal {
           itemsEl.textContent = `${sessionCount} ${sessionCount === 1 ? 'chat' : 'chats'}`;
         }
         if (breakdownEl) {
-          const parts = [`${noteCount} ${noteCount === 1 ? 'note' : 'notes'}`];
+          const parts = [];
           if (appsCount > 0) {
             parts.push(`${appsCount} ${appsCount === 1 ? 'app' : 'apps'}`);
           }
           if (highlightCount > 0) {
             parts.push(`${highlightCount} hl`);
           }
-          breakdownEl.textContent = parts.join(' · ');
+          breakdownEl.textContent = parts.length > 0 ? parts.join(' · ') : '0 apps';
         }
       } catch (e) {
         if (itemsEl) itemsEl.textContent = 'Active';

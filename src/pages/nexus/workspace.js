@@ -822,15 +822,13 @@ async function ensureTabHistoryLoaded(tab) {
             }
             try {
                 const messages = await ChatHistoryManager.getSessionMessages(tab.sessionId);
+                console.log('[Workspace:History] Loading history for tab session:', tab.sessionId, 'Messages count:', messages ? messages.length : 0);
                 if (messages) {
                     const sessions = await ChatHistoryManager.getAllHistories();
                     const meta = sessions[tab.sessionId] || {};
                     const resolved = await window.NexusModelHelper.resolveSessionSettings(tab.sessionId, meta.selectedModel, meta.thinkingLevel);
                     tab.selectedModel = resolved.selectedModel;
                     tab.thinkingLevel = resolved.thinkingLevel;
-                    if (resolved.selectedModel) {
-                        await window.NexusModelHelper.saveModelSelection(resolved.selectedModel, tab.sessionId, resolved.thinkingLevel);
-                    }
                     if (tab.chatUIInstance) {
                         tab.chatUIInstance.activeTabModel = resolved.selectedModel ? { ...resolved.selectedModel } : null;
                         tab.chatUIInstance.thinkingLevel = resolved.thinkingLevel || null;
@@ -1145,7 +1143,7 @@ function closeTab(tabId) {
     saveTabsState();
 }
 
-function saveTabsState(forceSaveChat = false, saveHistory = true) {
+function saveTabsState(forceSaveChat = false, saveHistory = false) {
     const tabsMetadata = tabs.map(tab => {
         const model = tab.selectedModel || sharedInputUI?.activeTabModel || tab.chatUIInstance?.activeTabModel || null;
         const thinking = tab.thinkingLevel || sharedInputUI?.thinkingLevel || tab.chatUIInstance?.thinkingLevel || null;
@@ -2239,7 +2237,7 @@ async function init() {
     document.querySelectorAll('.nexus-overlay-backdrop').forEach(el => el.remove());
     document.body.style.overflow = '';
     document.documentElement.style.overflow = '';
-    document.querySelectorAll('.nexus-chat-scroll-content, .notes-editor-pane').forEach(el => {
+    document.querySelectorAll('.nexus-chat-scroll-content').forEach(el => {
         if (el.style.overflow === 'hidden') {
             el.style.overflow = '';
         }
@@ -2252,7 +2250,7 @@ async function init() {
         }
     });
     const mutationObserver = new MutationObserver(() => {
-        document.querySelectorAll('.nexus-chat-scroll-content, .notes-editor-pane').forEach(el => {
+        document.querySelectorAll('.nexus-chat-scroll-content').forEach(el => {
             if (!el.__observedForScrollbar) {
                 el.__observedForScrollbar = true;
                 observer.observe(el);
@@ -2262,7 +2260,7 @@ async function init() {
         });
     });
     mutationObserver.observe(document.body, { childList: true, subtree: true });
-    document.querySelectorAll('.nexus-chat-scroll-content, .notes-editor-pane').forEach(el => {
+    document.querySelectorAll('.nexus-chat-scroll-content').forEach(el => {
         if (!el.__observedForScrollbar) {
             el.__observedForScrollbar = true;
             observer.observe(el);
@@ -2606,11 +2604,6 @@ async function init() {
                     }
                 });
             }
-        } else if (request.action === 'nexus_notes_updated') {
-            if (typeof nexusNotesPanelInstance !== 'undefined' && nexusNotesPanelInstance) {
-                if (typeof nexusNotesPanelInstance.renderCollections === 'function') nexusNotesPanelInstance.renderCollections();
-                if (typeof nexusNotesPanelInstance.renderNotesList === 'function') nexusNotesPanelInstance.renderNotesList();
-            }
         } else if (request.action === 'nexus_tts_updated') {
             if (typeof nexusTTSPanelInstance !== 'undefined' && nexusTTSPanelInstance) {
                 if (typeof nexusTTSPanelInstance.loadRecordings === 'function') nexusTTSPanelInstance.loadRecordings();
@@ -2877,16 +2870,7 @@ function initSidebar() {
     }
     if (newChatBtn) {
         newChatBtn.addEventListener('click', () => {
-            if (typeof window.notesClosePage === 'function') window.notesClosePage();
             resetChat(null);
-            closeMobileSidebar();
-        });
-    }
-    const notesBtn = document.getElementById('sidebar-notes-btn');
-    if (notesBtn) {
-        notesBtn.addEventListener('click', () => {
-            if (typeof window.sparksClosePage === 'function') window.sparksClosePage();
-            if (typeof window.notesOpenPage === 'function') window.notesOpenPage();
             closeMobileSidebar();
         });
     }
@@ -2917,9 +2901,6 @@ function initSidebar() {
         brandBtn.style.cursor = 'pointer';
         brandBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            if (typeof window.notesClosePage === 'function') {
-                window.notesClosePage();
-            }
             if (typeof sparksClosePage === 'function') {
                 sparksClosePage();
             }
@@ -4569,7 +4550,6 @@ function setupGlobalListeners() {
 }
 
 async function resetChat() {
-    if (typeof window.notesClosePage === 'function') window.notesClosePage();
     if (typeof window.sparksClosePage === 'function') window.sparksClosePage();
     stopTTSAudio();
 
@@ -5090,7 +5070,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 window.loadHistoryIntoNewTab = async function (messages, meta, historySessionId, targetIndex = null) {
-    if (typeof window.notesClosePage === 'function') window.notesClosePage();
     if (typeof window.sparksClosePage === 'function') window.sparksClosePage();
     if (tabs.length === 0) return;
     const targetIdx = activeTabIndex;
@@ -5128,9 +5107,6 @@ window.loadHistoryIntoNewTab = async function (messages, meta, historySessionId,
         activeTab.chatUIInstance.sparkId = activeTab.sparkId;
         activeTab.chatUIInstance.activeTabModel = resolved.selectedModel ? { ...resolved.selectedModel } : null;
         activeTab.chatUIInstance.thinkingLevel = resolved.thinkingLevel || null;
-    }
-    if (resolved.selectedModel) {
-        await window.NexusModelHelper.saveModelSelection(resolved.selectedModel, historySessionId, resolved.thinkingLevel);
     }
     if (activeTab.historyEl) {
         activeTab.historyEl.dataset.sessionId = historySessionId;
@@ -5546,15 +5522,6 @@ function updateSidebarUserProfile(isAuthenticated, user) {
                 avatarEl.textContent = initials;
             }
         }
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local && wrapper) {
-            chrome.storage.local.get(['nexus_has_unsynced'], (res) => {
-                if (res && res.nexus_has_unsynced) {
-                    wrapper.classList.add('has-unsynced');
-                } else {
-                    wrapper.classList.remove('has-unsynced');
-                }
-            });
-        }
     } else {
         try {
             localStorage.removeItem('nexus_cached_user');
@@ -5772,9 +5739,11 @@ if (typeof NexusSync !== 'undefined') {
     });
 }
 
-// Listen for sync status broadcasts from the Service Worker
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((request) => {
+        if (request.action === 'nexus_sync_log' && Array.isArray(request.args)) {
+            console.log(...request.args);
+        }
         if (request.action === 'nexus_sync_status') {
             const wrapper = document.getElementById('user-avatar-wrapper');
             if (wrapper) {
@@ -5794,12 +5763,6 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
                 }
             }
         }
-        if (request.action === 'nexus_unsynced_status') {
-            const wrapper = document.getElementById('user-avatar-wrapper');
-            if (wrapper) {
-                wrapper.classList.toggle('has-unsynced', !!request.hasUnsynced);
-            }
-        }
     });
 }
 
@@ -5811,27 +5774,6 @@ window.addEventListener('keydown', (e) => {
         }
     }
 });
-
-let lastTabActiveTime = Date.now();
-const IDLE_SYNC_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
-
-function checkSyncOnTabReturn() {
-    if (document.visibilityState === 'visible') {
-        const now = Date.now();
-        const awayDuration = now - lastTabActiveTime;
-        lastTabActiveTime = now;
-        if (awayDuration >= IDLE_SYNC_THRESHOLD_MS) {
-            if (typeof NexusSync !== 'undefined' && typeof NexusAuth !== 'undefined' && NexusAuth.isAuthenticated) {
-                NexusSync.checkAutoSync(false);
-            }
-        }
-    } else {
-        lastTabActiveTime = Date.now();
-    }
-}
-
-document.addEventListener('visibilitychange', checkSyncOnTabReturn);
-window.addEventListener('focus', checkSyncOnTabReturn);
 
 window.showCustomPopup = function (options) {
     if (window.NexusModal && typeof window.NexusModal.showCustomPopup === 'function') {
@@ -5944,6 +5886,9 @@ function startConcurrentAutoNaming(sessionId, modelObj, questionText, images, hi
                     await NexusChatDB.putSession(session);
                     console.log('[AutoNaming] Successfully wrote title to DB for:', sessionId);
                     chrome.runtime.sendMessage({ action: 'nexus_sessions_index_updated' }).catch(() => {});
+                    if (typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
+                        NexusSync.triggerDebouncedSync();
+                    }
                 } else if (attemptsLeft > 0) {
                     setTimeout(() => tryWriteTitle(attemptsLeft - 1), 400);
                 } else {
