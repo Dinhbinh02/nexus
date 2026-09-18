@@ -79,7 +79,7 @@ export async function playChunksSequentially(chunks, speed) {
     }
 }
 
-export async function playCombinedAudio(text, forcedLang = null) {
+export async function playCombinedAudio(text, forcedLang = null, sentenceContext = null) {
     if (!text) return;
     if (audioDebounceTimer) { clearTimeout(audioDebounceTimer); audioDebounceTimer = null; }
     audioAborted = true;
@@ -104,7 +104,13 @@ export async function playCombinedAudio(text, forcedLang = null) {
                 return;
             }
         } catch (e) { }
-        const result = await chrome.runtime.sendMessage({ action: 'fetchAudio', text: normalizedText, speed, lang: forcedLang });
+        const result = await chrome.runtime.sendMessage({
+            action: 'fetchAudio',
+            text: normalizedText,
+            speed,
+            lang: forcedLang,
+            sentenceContext
+        });
         if (!result || !result.chunks || result.chunks.length === 0) return;
         audioCache = { text: cacheKey, type: result.type, data: result.chunks };
         await playChunksSequentially(result.chunks, speed);
