@@ -102,7 +102,7 @@ export const Providers = {
         supports: (lang, text) => lang === 'es' && text.trim().split(/\s+/).length <= 2,
         getAudio: async (text, lang) => {
             const url = `https://audio1.spanishdict.com/audio?lang=es&text=${encodeURIComponent(text)}`;
-            const res = await fetchWithTimeout(url, { headers: DEFAULT_HEADERS, timeoutMs: 2500 });
+            const res = await fetchHttp(url, DEFAULT_HEADERS, 2500);
             if (!res.ok) throw new Error(`SpanishDict HTTP ${res.status}`);
             const buf = await res.arrayBuffer();
             if (buf.byteLength < 100) throw new Error('Empty SpanishDict audio');
@@ -132,7 +132,7 @@ export const Providers = {
             else if (lang === 'de') le = 'de';
 
             const url = `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(text)}&le=${le}`;
-            const res = await fetchWithTimeout(url, { headers: DEFAULT_HEADERS, timeoutMs: 2500 });
+            const res = await fetchHttp(url, DEFAULT_HEADERS, 2500);
             if (!res.ok) throw new Error(`Youdao HTTP ${res.status}`);
             const buf = await res.arrayBuffer();
             if (buf.byteLength < 100) throw new Error('Empty Youdao audio');
@@ -191,13 +191,10 @@ export const Providers = {
             if (!soundId) throw new Error('No Papago sound ID');
 
             const audioUrl = `https://papago.naver.com/api/tts/${soundId}`;
-            const audioRes = await fetchWithTimeout(audioUrl, {
-                headers: {
-                    ...DEFAULT_HEADERS,
-                    'Referer': 'https://papago.naver.com/'
-                },
-                timeoutMs: 4000
-            });
+            const audioRes = await fetchHttp(audioUrl, {
+                ...DEFAULT_HEADERS,
+                'Referer': 'https://papago.naver.com/'
+            }, 4000);
 
             if (!audioRes.ok) throw new Error(`Papago audio HTTP ${audioRes.status}`);
             const buf = await audioRes.arrayBuffer();
@@ -215,10 +212,10 @@ export const Providers = {
         name: 'Google Translate',
         supports: () => true,
         getAudio: async (text, lang, options = {}) => {
-            const cleanLang = lang.startsWith('zh') ? lang : lang.split('-')[0];
+            const cleanLang = /^(en-|zh-|pt-|es-|fr-)/i.test(lang) ? lang.toLowerCase() : lang.split('-')[0];
             const speedParam = options.speed && options.speed < 0.9 ? '0.24' : '1';
             const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text)}&tl=${cleanLang}&total=1&idx=0&textlen=${text.length}&client=tw-ob&ttsspeed=${speedParam}`;
-            const res = await fetchWithTimeout(url, { headers: DEFAULT_HEADERS, timeoutMs: 4500 });
+            const res = await fetchHttp(url, DEFAULT_HEADERS, 4500);
             if (!res.ok) throw new Error(`Google Translate HTTP ${res.status}`);
             const buf = await res.arrayBuffer();
             if (buf.byteLength < 100) throw new Error('Empty Google audio');

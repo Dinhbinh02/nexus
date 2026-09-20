@@ -96,12 +96,13 @@ export async function fetchAudio(text, speed = 1.0, forcedLang = null, options =
     if (Providers.oxford_dictionary.supports(lang, normalizedText)) {
         try {
             const oxfordPromise = Providers.oxford_dictionary.getAudio(normalizedText, lang, { pos, sentenceContext: options.sentenceContext }).catch(() => null);
-            const cambridgePromise = Providers.cambridge_dictionary.getAudio(normalizedText, lang, { pos, sentenceContext: options.sentenceContext }).catch(() => null);
+            const longmanPromise = Providers.longman_dictionary.getAudio(normalizedText, lang, { pos, sentenceContext: options.sentenceContext }).catch(() => null);
             const fastGooglePromise = Providers.google_translate.getAudio(normalizedText, lang, { speed }).catch(() => null);
 
+            // Phase 1: Oxford check (Google static sounds returns in 100-350ms)
             const fastOxford = await Promise.race([
                 oxfordPromise,
-                new Promise(resolve => setTimeout(() => resolve(null), 100))
+                new Promise(resolve => setTimeout(() => resolve(null), 380))
             ]);
 
             if (fastOxford && fastOxford.audioDataUrl) {
@@ -114,52 +115,52 @@ export async function fetchAudio(text, speed = 1.0, forcedLang = null, options =
                 matchedPos = fastOxford.pos;
                 posMatched = fastOxford.posMatched;
             } else {
-                const fastCambridge = await Promise.race([
-                    cambridgePromise,
-                    new Promise(resolve => setTimeout(() => resolve(null), 150))
+                // Phase 2: Race Oxford/Longman vs Google Translate for lowest latency
+                const fastDictOrGoogle = await Promise.race([
+                    oxfordPromise,
+                    longmanPromise,
+                    fastGooglePromise,
+                    new Promise(resolve => setTimeout(() => resolve(null), 500))
                 ]);
 
-                if (fastCambridge && fastCambridge.audioDataUrl) {
-                    chunks = [fastCambridge.audioDataUrl];
-                    providerType = 'cambridge_dictionary';
-                    ipa = fastCambridge.ipa;
-                    definitions = fastCambridge.definitions;
-                    is_academic_word = fastCambridge.is_academic_word;
-                    related_words = fastCambridge.related_words;
-                    matchedPos = fastCambridge.pos;
-                    posMatched = fastCambridge.posMatched;
+                if (fastDictOrGoogle && fastDictOrGoogle.audioDataUrl) {
+                    chunks = [fastDictOrGoogle.audioDataUrl];
+                    providerType = fastDictOrGoogle.definitions ? (fastDictOrGoogle.service === 'Longman Dictionary' ? 'longman_dictionary' : 'oxford_dictionary') : 'google_translate';
+                    ipa = fastDictOrGoogle.ipa;
+                    definitions = fastDictOrGoogle.definitions || [];
+                    is_academic_word = fastDictOrGoogle.is_academic_word || false;
+                    related_words = fastDictOrGoogle.related_words || [];
+                    matchedPos = fastDictOrGoogle.pos || '';
+                    posMatched = fastDictOrGoogle.posMatched || false;
                 } else {
-                    const gData = await fastGooglePromise;
+                    // Phase 3: Wait for fastGoogle or Longman or Oxford
+                    const gData = await fastGooglePromise || await oxfordPromise || await longmanPromise;
                     if (gData && gData.audioDataUrl) {
                         chunks = [gData.audioDataUrl];
-                        providerType = 'google_translate';
-                    } else {
-                        const fallbackCam = await cambridgePromise;
-                        if (fallbackCam && fallbackCam.audioDataUrl) {
-                            chunks = [fallbackCam.audioDataUrl];
-                            providerType = 'cambridge_dictionary';
-                            ipa = fallbackCam.ipa;
-                            definitions = fallbackCam.definitions;
-                            is_academic_word = fallbackCam.is_academic_word;
-                            related_words = fallbackCam.related_words;
-                            matchedPos = fallbackCam.pos;
-                            posMatched = fallbackCam.posMatched;
-                        }
+                        providerType = gData.definitions ? 'oxford_dictionary' : 'google_translate';
+                        ipa = gData.ipa;
+                        definitions = gData.definitions || [];
+                        is_academic_word = gData.is_academic_word || false;
+                        related_words = gData.related_words || [];
+                        matchedPos = gData.pos || '';
+                        posMatched = gData.posMatched || false;
                     }
                 }
             }
 
-            cambridgePromise.then(camData => {
-                if (camData && (camData.ipa || (camData.definitions && camData.definitions.length > 0))) {
+            // Async Background Enrichment: whichever rich dictionary returns, persist rich data to cache
+            Promise.all([oxfordPromise, longmanPromise]).then(([oxData, ldoceData]) => {
+                const bestDict = (oxData && oxData.audioDataUrl) ? oxData : ((ldoceData && ldoceData.audioDataUrl) ? ldoceData : null);
+                if (bestDict && (bestDict.ipa || (bestDict.definitions && bestDict.definitions.length > 0) || bestDict.audioDataUrl)) {
                     setAudioCache(cacheKey, {
-                        type: camData.audioDataUrl ? 'cambridge_dictionary' : providerType,
-                        chunks: camData.audioDataUrl ? [camData.audioDataUrl] : chunks,
-                        ipa: camData.ipa || ipa,
-                        definitions: camData.definitions || definitions,
-                        is_academic_word: camData.is_academic_word || is_academic_word,
-                        related_words: camData.related_words || related_words,
-                        pos: camData.pos || matchedPos,
-                        posMatched: camData.posMatched || posMatched
+                        type: bestDict.service === 'Longman Dictionary' ? 'longman_dictionary' : 'oxford_dictionary',
+                        chunks: bestDict.audioDataUrl ? [bestDict.audioDataUrl] : chunks,
+                        ipa: bestDict.ipa || ipa,
+                        definitions: bestDict.definitions || definitions,
+                        is_academic_word: bestDict.is_academic_word || is_academic_word,
+                        related_words: bestDict.related_words || related_words,
+                        pos: bestDict.pos || matchedPos,
+                        posMatched: bestDict.posMatched || posMatched
                     }).catch(() => { });
                 }
             }).catch(() => { });

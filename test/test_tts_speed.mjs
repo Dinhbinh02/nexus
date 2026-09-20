@@ -146,7 +146,7 @@ const providers = {
         name: 'Google Translate TTS',
         supports: () => true,
         fetchAudio: async (text, lang) => {
-            const cleanLang = lang.split('-')[0];
+            const cleanLang = /^(en-|zh-|pt-|es-|fr-)/i.test(lang) ? lang.toLowerCase() : lang.split('-')[0];
             const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text)}&tl=${cleanLang}&total=1&idx=0&textlen=${text.length}&client=tw-ob&ttsspeed=1`;
             const res = await fetch(url, { headers: HEADERS });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
