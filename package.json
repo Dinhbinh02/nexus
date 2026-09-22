@@ -22,6 +22,6 @@
     "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
-    "adm-zip": "^0.6.0"
+    "adm-zip": "^0.6.1"
   }
 }
