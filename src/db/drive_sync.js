@@ -53,31 +53,20 @@ export function syncLog(...args) {
     } catch (e) {}
 }
 
-export const isExcludedKey = (k) => [
-    'google_oauth_token', 'google_oauth_token_time',
-    'google_user_info', 'nexus_cached_user',
+const EXCLUDED_PREFIX_REGEX = /^(google_|temp_|rot_|pending_|nexus_img_|(nexus|sidepanel)_(tabs|active_|secondary_|tab_counter|is_split|split_|session_)|lumina_session_)/;
+const EXCLUDED_KEYS = new Set([
+    'google_oauth_token', 'google_oauth_token_time', 'google_user_info', 'nexus_cached_user',
     'last_sync_time', 'last_sync_hash', 'last_sync_md5', 'last_sync_size', 'last_cloud_stats',
     'drive_uploaded_blobs', 'drive_backup_file_id', 'settings_last_updated',
     'optionsLastSection', 'optionsLastScroll', 'optionsScrollPositions',
-    'sidepanel_active_tab_index', 'sidepanel_active_group_index', 'sidepanel_secondary_tab_index',
-    'sidepanel_is_split_mode', 'sidepanel_split_ratio', 'sidepanel_tabs', 'sidepanel_tab_counter',
-    'nexus_active_tab_index', 'nexus_active_group_index', 'nexus_secondary_tab_index',
-    'nexus_is_split_mode', 'nexus_split_ratio', 'nexus_tabs', 'nexus_tab_counter',
-    'nexusWindowId', 'pendingMicToggle',
-    'nexusTemplatesV3', 'nexusBatchHistoryV3', 'lastUsedGenAIModel',
-    'lastUsedBatchSize', 'lastUsedDeck', 'lastUsedTemplateId', 'ankiQuickNoteContent',
-    'attachments', 'audio_cache',
-    'lastUsedModel', 'lastUsedThinkingLevel', 'nexus_session_settings'
-].includes(k) ||
-    k.includes('_inst_') ||
-    k.startsWith('google_') ||
-    k.startsWith('nexus_session_') ||
-    k.startsWith('lumina_session_') ||
-    k.startsWith('pending_sidepanel_query_') ||
-    k.startsWith('rot_') ||
-    k.startsWith('nexus_img_cache_') ||
-    k.startsWith('nexus_img_query_') ||
-    k.startsWith('temp_');
+    'nexusWindowId', 'pendingMicToggle', 'nexusTemplatesV3', 'nexusBatchHistoryV3',
+    'lastUsedGenAIModel', 'lastUsedBatchSize', 'lastUsedDeck', 'lastUsedTemplateId',
+    'ankiQuickNoteContent', 'attachments', 'audio_cache', 'lastUsedModel',
+    'lastUsedThinkingLevel', 'lastUsedModelId', 'dailyModelStats',
+    'nexus_session_settings', 'nexus_spark_last_settings'
+]);
+
+export const isExcludedKey = (k) => EXCLUDED_KEYS.has(k) || k.includes('_inst_') || EXCLUDED_PREFIX_REGEX.test(k);
 
 
 export class SyncManager {

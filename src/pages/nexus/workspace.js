@@ -1198,7 +1198,7 @@ function saveTabsState(forceSaveChat = false, saveHistory = false) {
             savedSessionIds.add(tab.sessionId);
             window._localSavedSessions[tab.sessionId] = Date.now();
             const suppressBroadcast = isStreaming && streamingTab.sessionId === tab.sessionId;
-            if (typeof ChatHistoryManager !== 'undefined') {
+            if (saveHistory && typeof ChatHistoryManager !== 'undefined') {
                 ChatHistoryManager.saveCurrentChat(tab.historyEl, tab.sessionId, tab.sparkId, forceSaveChat, {
                     selectedModel: tab.selectedModel,
                     thinkingLevel: tab.thinkingLevel
@@ -3541,6 +3541,10 @@ function setupPort() {
                     sharedInputUI._updateActionBtnState();
                 }
                 streamingTab = null;
+                saveTabsState(true, true);
+                if (typeof NexusSync !== 'undefined') {
+                    NexusSync.triggerDebouncedSync();
+                }
                 return;
             }
             if (msg.action === 'web_search_status') {
@@ -3745,7 +3749,10 @@ async function handleSubmit(text, images, extra = {}, targetTab = null, displayQ
             _activeInputUI.isGenerating = false;
             _activeInputUI._updateActionBtnState();
         }
-        saveTabsState();
+        await saveTabsState(true, true);
+        if (typeof NexusSync !== 'undefined') {
+            NexusSync.triggerDebouncedSync();
+        }
         return;
     }
     if (extra.mode === 'websource') {
@@ -4016,6 +4023,11 @@ async function handleSubmit(text, images, extra = {}, targetTab = null, displayQ
             if (_activeInputUI) {
                 _activeInputUI.isGenerating = false;
                 _activeInputUI._updateActionBtnState();
+            }
+            streamingTab = null;
+            saveTabsState(true, true);
+            if (typeof NexusSync !== 'undefined') {
+                NexusSync.triggerDebouncedSync();
             }
         };
         if (_activeInputUI) {
@@ -5895,7 +5907,7 @@ function startConcurrentAutoNaming(sessionId, modelObj, questionText, images, hi
                         await NexusChatDB.putSession(session);
                         console.log('[AutoNaming] Successfully wrote title to DB for:', sessionId);
                         chrome.runtime.sendMessage({ action: 'nexus_sessions_index_updated' }).catch(() => {});
-                        if (typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
+                        if (!streamingTab && typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
                             NexusSync.triggerDebouncedSync();
                         }
                     }

@@ -292,7 +292,7 @@ export const ChatHistoryManager = {
                 chrome.runtime.sendMessage({ action: 'nexus_session_updated', sessionId: activeSessionId, source: 'local_save', senderInstanceId }).catch(() => { });
             }
             chrome.runtime.sendMessage({ action: 'nexus_sessions_index_updated', senderInstanceId }).catch(() => { });
-            if (typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
+            if (!suppressBroadcast && typeof NexusSync !== 'undefined' && typeof NexusSync.triggerDebouncedSync === 'function') {
                 NexusSync.triggerDebouncedSync();
             }
         } catch (error) {
