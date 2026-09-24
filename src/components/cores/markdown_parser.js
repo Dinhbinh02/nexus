@@ -285,7 +285,18 @@ export function renderKaTeXFormula(rawMath, isDisplay = false) {
     if (!isDisplay && /\\(?:frac|dfrac|cfrac|sum|int|prod|lim|begin)\b/.test(math) && !/\\displaystyle\b/.test(math)) {
         math = '\\displaystyle ' + math;
     }
-    return katex.renderToString(math, { displayMode: isDisplay, throwOnError: false, strict: 'ignore' });
+    const textSlots = [];
+    math = math.replace(/\\(text|textbf|textit|textsf|texttt|mathrm|mathbf|mathit|operatorname)\{([^{}]+)\}/g, (_, cmd, content) => {
+        const id = textSlots.length;
+        textSlots.push(content);
+        return `\\${cmd}{NEXUSTXT${id}X}`;
+    });
+    let html = katex.renderToString(math, { displayMode: isDisplay, throwOnError: false, strict: 'ignore' });
+    for (let i = 0; i < textSlots.length; i++) {
+        const clean = textSlots[i].replace(/\\([%&#_{}])/g, '$1').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        html = html.replaceAll(`NEXUSTXT${i}X`, clean);
+    }
+    return html;
 }
 
 export function initMarkdownMath() {
